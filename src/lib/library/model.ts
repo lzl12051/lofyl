@@ -7,6 +7,17 @@ function cloneTrack(track: Track): Track {
   return { ...track };
 }
 
+function inferAlbumArtistFromTracks(tracks: Track[]): string {
+  const artists = [...new Set(tracks.map((track) => track.artist.trim()).filter(Boolean))];
+  if (artists.length === 0) {
+    return '';
+  }
+  if (artists.length === 1) {
+    return artists[0];
+  }
+  return 'Various Artists';
+}
+
 function hydrateTrack(track: Track): Track {
   const nextTrack = cloneTrack(track);
 
@@ -57,7 +68,7 @@ export function createLibraryAlbumFromPreparedImport(
   return {
     id: albumId,
     title: prepared.albumTitle,
-    artist: '',
+    artist: prepared.albumArtist ?? inferAlbumArtistFromTracks(hydratedTracks),
     coverUrl: prepared.coverUrl,
     sides,
     createdAt: now,
@@ -102,7 +113,11 @@ export function appendPreparedImportToAlbum(album: LibraryAlbum, prepared: Prepa
     currentDuration += track.duration;
   }
 
-  return removeEmptySides(nextAlbum);
+  const compactAlbum = removeEmptySides(nextAlbum);
+  return {
+    ...compactAlbum,
+    artist: inferAlbumArtistFromTracks(compactAlbum.sides.flat()),
+  };
 }
 
 export function moveTrackWithinAlbum(
@@ -175,9 +190,11 @@ export function libraryAlbumToPlaybackAlbum(album: LibraryAlbum): Album {
 }
 
 export function hydrateLibraryAlbum(album: LibraryAlbum): LibraryAlbum {
+  const hydratedSides = album.sides.map((side) => side.map(hydrateTrack));
   return {
     ...album,
-    sides: album.sides.map((side) => side.map(hydrateTrack)),
+    artist: album.artist.trim() || inferAlbumArtistFromTracks(hydratedSides.flat()),
+    sides: hydratedSides,
   };
 }
 

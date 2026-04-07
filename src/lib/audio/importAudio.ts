@@ -8,6 +8,7 @@ interface AudioSourceEntry {
   path: string;
   displayPath: string;
   title?: string;
+  artist?: string;
 }
 
 interface AudioImportSelection {
@@ -17,6 +18,7 @@ interface AudioImportSelection {
 
 export interface PreparedImport {
   albumTitle: string;
+  albumArtist?: string;
   coverUrl?: string;
   tracks: Track[];
 }
@@ -51,6 +53,7 @@ async function buildPreparedImport(
     idBase: string;
     name: string;
     title?: string;
+    artist?: string;
     displayPath?: string;
     mimeType?: string;
     file?: File;
@@ -78,7 +81,7 @@ async function buildPreparedImport(
       tracks.push({
         id: `track-${index}-${source.idBase}`,
         title: source.title ?? stripTrackNumberPrefix(stripExtension(source.name)),
-        artist: '',
+        artist: source.artist?.trim() ?? '',
         duration: await decodeDuration(ctx, arrayBuffer),
         file: source.file,
         sourcePath: source.file ? undefined : source.idBase,
@@ -98,9 +101,21 @@ async function buildPreparedImport(
 
   return {
     albumTitle,
+    albumArtist: inferAlbumArtist(tracks),
     coverUrl,
     tracks,
   };
+}
+
+function inferAlbumArtist(tracks: Track[]): string | undefined {
+  const artists = [...new Set(tracks.map((track) => track.artist.trim()).filter(Boolean))];
+  if (artists.length === 0) {
+    return undefined;
+  }
+  if (artists.length === 1) {
+    return artists[0];
+  }
+  return 'Various Artists';
 }
 
 export async function prepareBrowserImport(files: File[]): Promise<PreparedImport> {
@@ -148,6 +163,7 @@ async function prepareDesktopImport(command: 'pick_audio_files' | 'pick_audio_fo
           name,
           displayPath: entry.displayPath,
           title: entry.title,
+          artist: entry.artist,
           mimeType: '',
           loadArrayBuffer: async () => {
             const response = await fetch(assetUrl);

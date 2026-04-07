@@ -438,11 +438,10 @@
     <aside class="library-panel" class:collapsed={!libraryPanelVisible}>
       {#if libraryPanelVisible}
         <div class="library-shell">
-          <div class="panel-head">
+          <div class="panel-head library-marquee">
             <div class="panel-title-block">
               <div class="eyebrow">MUSIC LIBRARY</div>
               <h1 class="panel-title">专辑库</h1>
-              <p class="panel-note">本地唱片目录与当前盘面。</p>
             </div>
 
             <div class="panel-toolbar" aria-label="导入新专辑与曲库控制">
@@ -467,17 +466,26 @@
 
           <div class="section focus-section">
             {#if selectedAlbum}
-              <div class="selected-album-card">
-                <div class="selected-album-copy">
-                  <div class="section-label">当前专辑</div>
-                  <div class="selected-album-headline">
-                    <span class="selected-album-title">{selectedAlbum.title}</span>
-                    <span class="selected-album-badge">已选中</span>
+              <div
+                class="selected-album-card"
+                class:has-cover={Boolean(selectedAlbum.coverUrl)}
+                style={selectedAlbum.coverUrl ? `--selected-album-art: url("${selectedAlbum.coverUrl}")` : undefined}
+              >
+                <div class="selected-album-shell">
+                  <div class="selected-album-copy">
+                    <div class="section-label">当前专辑</div>
+                    <div class="selected-album-headline">
+                      <span class="selected-album-title">{selectedAlbum.title}</span>
+                      <span class="selected-album-badge">当前专辑</span>
+                    </div>
+                    <span class="selected-album-artist">{selectedAlbum.artist || '未署名艺人'}</span>
+                    <div class="selected-album-stats">
+                      <span>{Math.ceil(selectedAlbum.sides.length / 2)} 张碟</span>
+                      <span>{selectedAlbum.sides.length} 面</span>
+                      <span>{countAlbumTracks(selectedAlbum)} 首</span>
+                      <span>{formatTime(getAlbumDuration(selectedAlbum))}</span>
+                    </div>
                   </div>
-                  <span class="selected-album-meta">
-                    {Math.ceil(selectedAlbum.sides.length / 2)} 张碟 · {selectedAlbum.sides.length} 面 ·
-                    {countAlbumTracks(selectedAlbum)} 首 · {formatTime(getAlbumDuration(selectedAlbum))}
-                  </span>
                 </div>
 
                 <div class="selected-album-actions">
@@ -489,9 +497,12 @@
                 {#if playbackAlbum && currentSide}
                   <div class="sidebar-side-panel">
                     <div class="sidebar-side-head">
-                      <span class="section-label">当前盘面</span>
+                      <div class="sidebar-side-kicker">
+                        <span class="section-label">当前盘面</span>
+                        <span class="sidebar-side-badge">Side {currentSide.label}</span>
+                      </div>
                       <span class="selected-album-meta">
-                        Side {currentSide.label} · {currentSide.tracks.length} 首 · {formatTime(currentSide.totalDuration)}
+                        {currentSide.tracks.length} 首曲目 · 总时长 {formatTime(currentSide.totalDuration)}
                       </span>
                     </div>
 
@@ -509,6 +520,11 @@
                     </div>
 
                     <div class="sidebar-track-list">
+                      <div class="sidebar-track-list-head" aria-hidden="true">
+                        <span>Track</span>
+                        <span>Title</span>
+                        <span>Time</span>
+                      </div>
                       {#each currentSide.tracks as track, index}
                         <div class="sidebar-track" class:playing={isCurrentTrack(currentSide, index, currentTime)}>
                           <span class="sidebar-track-num">{String(index + 1).padStart(2, '0')}</span>
@@ -519,34 +535,40 @@
                     </div>
                   </div>
                 {:else}
-                  <p class="helper">当前专辑还没有可播放的盘面。</p>
+                  <p class="helper side-helper">当前专辑还没有可播放的盘面。</p>
                 {/if}
               </div>
             {:else}
-              <p class="empty-state">先导入一张专辑，左侧保持曲库导航，编辑器按需打开。</p>
+              <p class="empty-state">先导入一张专辑。</p>
             {/if}
           </div>
 
-          <div class="section">
-            <div class="section-label">专辑列表</div>
+          <div class="section catalog-section">
+            <div class="catalog-head">
+              <div class="section-label">专辑目录</div>
+              <span class="catalog-count">{libraryAlbums.length} 张收藏</span>
+            </div>
             {#if libraryAlbums.length === 0}
               <p class="empty-state">还没有专辑，先从本地音频文件或文件夹导入。</p>
             {:else}
               <div class="album-list">
-                {#each libraryAlbums as item}
+                {#each libraryAlbums as item, index}
                   <button
                     class="album-card"
                     class:active={item.id === selectedAlbumId}
                     on:click={() => void selectAlbumById(item.id)}
                     type="button"
                   >
-                    <span class="album-card-title">{item.title}</span>
-                    {#if item.id === selectedAlbumId}
-                      <span class="album-card-badge">已选中</span>
-                    {/if}
-                    <span class="album-card-meta">
-                      {Math.ceil(item.sides.length / 2)} 张碟 · {item.sides.length} 面 · {countAlbumTracks(item)} 首
+                    <span class="album-card-index">{String(index + 1).padStart(2, '0')}</span>
+                    <span class="album-card-copy">
+                      <span class="album-card-title">{item.title}</span>
+                      <span class="album-card-meta">
+                        {Math.ceil(item.sides.length / 2)} 张碟 · {item.sides.length} 面 · {countAlbumTracks(item)} 首
+                      </span>
                     </span>
+                    {#if item.id === selectedAlbumId}
+                      <span class="album-card-badge">Playing Shelf</span>
+                    {/if}
                   </button>
                 {/each}
               </div>
@@ -725,7 +747,7 @@
 
   .studio {
     display: grid;
-    grid-template-columns: minmax(282px, 324px) minmax(0, 1fr);
+    grid-template-columns: minmax(344px, 392px) minmax(0, 1fr);
     height: 100%;
     min-width: 0;
     min-height: 0;
@@ -738,15 +760,21 @@
     position: relative;
     display: flex;
     flex-direction: column;
-    padding: 16px 14px 14px 10px;
-    border-right: 1px solid rgba(112, 76, 31, 0.18);
+    padding: 18px 16px 16px 12px;
+    border-right: 1px solid rgba(110, 73, 30, 0.2);
     background:
-      linear-gradient(180deg, rgba(255, 251, 243, 0.72), rgba(232, 217, 190, 0.86)),
-      rgba(229, 213, 184, 0.95);
+      linear-gradient(180deg, rgba(253, 248, 238, 0.6), rgba(216, 192, 153, 0.22)),
+      linear-gradient(145deg, rgba(121, 84, 43, 0.3), rgba(81, 51, 24, 0.08)),
+      linear-gradient(180deg, #cfb189 0%, #b38e64 100%);
     backdrop-filter: blur(12px);
     min-width: 0;
     min-height: 0;
     overflow: hidden;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 247, 233, 0.32),
+      inset -1px 0 0 rgba(84, 54, 22, 0.14),
+      18px 0 40px rgba(83, 53, 22, 0.14);
+    font-family: Georgia, 'Times New Roman', serif;
   }
   .library-panel.collapsed .library-shell {
     display: none;
@@ -779,7 +807,8 @@
   .library-shell {
     height: 100%;
     overflow-y: auto;
-    padding-right: 6px;
+    gap: 18px;
+    padding-right: 8px;
     scrollbar-width: thin;
     scrollbar-color: rgba(126, 94, 47, 0.34) transparent;
   }
@@ -835,6 +864,19 @@
     align-items: stretch;
   }
 
+  .library-marquee {
+    gap: 14px;
+    padding: 16px 16px 14px;
+    border-radius: 24px;
+    background:
+      linear-gradient(180deg, rgba(93, 58, 25, 0.18), rgba(255, 247, 233, 0.2) 24%, rgba(255, 245, 228, 0.78) 100%);
+    border: 1px solid rgba(116, 78, 33, 0.16);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 252, 246, 0.52),
+      inset 0 -10px 20px rgba(153, 111, 56, 0.06),
+      0 16px 30px rgba(94, 59, 23, 0.12);
+  }
+
   .turntable-head {
     align-items: center;
     justify-content: space-between;
@@ -853,6 +895,7 @@
     letter-spacing: 0.22em;
     color: #8a6a3c;
     text-transform: uppercase;
+    font-family: 'Courier New', monospace;
   }
 
   .panel-title,
@@ -865,14 +908,8 @@
   .panel-title-block {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
     min-width: 0;
-  }
-
-  .panel-note {
-    font-size: calc(10px * var(--app-font-scale));
-    line-height: 1.45;
-    color: rgba(88, 60, 25, 0.72);
   }
 
   .panel-toolbar {
@@ -880,8 +917,8 @@
     flex-wrap: wrap;
     align-items: center;
     justify-content: flex-start;
-    gap: 6px;
-    padding-top: 4px;
+    gap: 8px;
+    padding-top: 2px;
   }
 
   .turntable-heading {
@@ -909,7 +946,7 @@
   .section {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
   }
 
   .section-label {
@@ -917,6 +954,7 @@
     letter-spacing: 0.16em;
     text-transform: uppercase;
     color: #8d6b3d;
+    font-family: 'Courier New', monospace;
   }
 
   .mini-btn,
@@ -934,44 +972,57 @@
   }
 
   .mini-btn {
-    min-height: 26px;
-    padding: 6px 10px;
+    min-height: 30px;
+    padding: 7px 12px;
     border: 1px solid rgba(120, 84, 38, 0.18);
-    background: rgba(255, 249, 240, 0.9);
+    background: linear-gradient(180deg, rgba(255, 250, 243, 0.96), rgba(244, 229, 202, 0.88));
     color: #5b3a12;
     font-size: calc(10px * var(--app-font-scale));
-    letter-spacing: 0.04em;
+    letter-spacing: 0.08em;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.6),
+      0 6px 12px rgba(106, 69, 29, 0.08);
+    font-family: 'Courier New', monospace;
   }
 
   .toggle-library-btn {
-    min-height: 26px;
-    padding: 6px 10px;
+    min-height: 30px;
+    padding: 7px 12px;
     border: 1px solid rgba(120, 84, 38, 0.18);
-    background: rgba(255, 249, 240, 0.9);
+    background: linear-gradient(180deg, rgba(255, 250, 243, 0.96), rgba(244, 229, 202, 0.88));
     color: #5b3a12;
     font-size: calc(10px * var(--app-font-scale));
-    letter-spacing: 0.04em;
+    letter-spacing: 0.08em;
     border-radius: 10px;
     cursor: pointer;
     transition: transform 0.14s ease, background 0.14s ease, opacity 0.14s ease;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.6),
+      0 6px 12px rgba(106, 69, 29, 0.08);
+    font-family: 'Courier New', monospace;
   }
 
   .primary-btn,
   .ghost-btn {
-    min-height: 28px;
-    padding: 6px 10px;
+    min-height: 34px;
+    padding: 8px 14px;
     font-size: calc(10px * var(--app-font-scale));
   }
 
   .primary-btn {
-    background: #8b5f34;
-    color: #fff4e6;
+    background: linear-gradient(180deg, #9e7242, #7d5328);
+    color: #fff5e7;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 244, 223, 0.35),
+      0 10px 18px rgba(92, 55, 18, 0.16);
+    font-family: 'Courier New', monospace;
   }
 
   .ghost-btn {
     border: 1px solid rgba(133, 98, 49, 0.16);
-    background: rgba(255, 250, 242, 0.82);
+    background: linear-gradient(180deg, rgba(255, 250, 242, 0.92), rgba(245, 232, 208, 0.86));
     color: #553712;
+    font-family: 'Courier New', monospace;
   }
 
   .mini-btn:disabled,
@@ -999,7 +1050,7 @@
   .arranger-meta,
   .empty-state {
     font-size: calc(10px * var(--app-font-scale));
-    line-height: 1.45;
+    line-height: 1.6;
     color: #80613a;
   }
 
@@ -1007,43 +1058,70 @@
     color: #af2f2f;
     font-size: calc(10px * var(--app-font-scale));
     line-height: 1.45;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(255, 245, 241, 0.72);
+    border: 1px solid rgba(175, 47, 47, 0.12);
   }
 
   .album-list,
   .side-editor-list {
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 10px;
     min-width: 0;
   }
 
   .album-card {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 3px;
-    padding: 10px 11px;
-    background: rgba(255, 251, 244, 0.62);
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 14px 13px;
+    border-radius: 18px;
+    background:
+      linear-gradient(180deg, rgba(255, 252, 246, 0.94), rgba(243, 229, 205, 0.9)),
+      rgba(255, 251, 244, 0.62);
     border: 1px solid rgba(133, 98, 49, 0.12);
     color: #4c3210;
     text-align: left;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.52),
+      0 10px 18px rgba(96, 59, 17, 0.06);
   }
 
   .album-card.active {
     background:
-      linear-gradient(90deg, rgba(146, 105, 50, 0.13), rgba(255, 248, 238, 0.96) 26%),
-      rgba(255, 250, 242, 0.9);
+      linear-gradient(90deg, rgba(146, 105, 50, 0.2), rgba(255, 248, 238, 0.98) 18%),
+      linear-gradient(180deg, rgba(255, 252, 246, 0.98), rgba(241, 226, 198, 0.92));
     color: #2f1c04;
     border-color: rgba(133, 98, 49, 0.14);
     box-shadow:
-      inset 3px 0 0 rgba(120, 82, 31, 0.82),
-      0 8px 18px rgba(96, 59, 17, 0.08);
+      inset 4px 0 0 rgba(120, 82, 31, 0.82),
+      inset 0 1px 0 rgba(255, 255, 255, 0.58),
+      0 14px 24px rgba(96, 59, 17, 0.1);
+  }
+
+  .album-card-index {
+    align-self: flex-start;
+    padding-top: 1px;
+    font-size: calc(9px * var(--app-font-scale));
+    letter-spacing: 0.18em;
+    color: rgba(108, 73, 31, 0.72);
+    font-family: 'Courier New', monospace;
+  }
+
+  .album-card-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
 
   .album-card-title {
-    font-size: calc(12px * var(--app-font-scale));
+    font-size: calc(13px * var(--app-font-scale));
     font-weight: 700;
+    line-height: 1.25;
   }
 
   .album-card-badge,
@@ -1055,29 +1133,62 @@
     font-size: calc(8px * var(--app-font-scale));
     letter-spacing: 0.1em;
     text-transform: uppercase;
+    font-family: 'Courier New', monospace;
   }
 
   .album-card-badge {
+    justify-self: flex-end;
     background: rgba(122, 81, 34, 0.08);
     border: 1px solid rgba(122, 81, 34, 0.12);
     color: #6a4315;
+    white-space: nowrap;
   }
 
   .album-card-meta {
     font-size: calc(9px * var(--app-font-scale));
-    opacity: 0.8;
+    line-height: 1.5;
+    color: rgba(87, 57, 20, 0.78);
   }
 
   .focus-section {
-    padding: 14px 13px 12px;
-    border-radius: 18px;
+    padding: 18px 17px 16px;
+    border-radius: 28px;
     background:
-      linear-gradient(180deg, rgba(255, 251, 244, 0.92), rgba(246, 235, 214, 0.88)),
+      linear-gradient(180deg, rgba(255, 252, 247, 0.95), rgba(242, 228, 201, 0.92)),
       rgba(255, 248, 235, 0.7);
-    border: 1px solid rgba(133, 98, 49, 0.1);
+    border: 1px solid rgba(133, 98, 49, 0.14);
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.45),
-      0 10px 22px rgba(118, 83, 34, 0.08);
+      inset 0 1px 0 rgba(255, 255, 255, 0.52),
+      inset 0 -18px 24px rgba(145, 104, 47, 0.05),
+      0 18px 30px rgba(118, 83, 34, 0.1);
+  }
+
+  .catalog-section {
+    padding: 16px 15px 14px;
+    border-radius: 24px;
+    background:
+      linear-gradient(180deg, rgba(246, 234, 211, 0.92), rgba(231, 210, 176, 0.9)),
+      rgba(239, 224, 197, 0.82);
+    border: 1px solid rgba(131, 92, 41, 0.14);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 249, 239, 0.42),
+      inset 0 -12px 20px rgba(118, 83, 34, 0.04),
+      0 14px 24px rgba(101, 65, 24, 0.08);
+  }
+
+  .catalog-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .catalog-count {
+    font-size: calc(9px * var(--app-font-scale));
+    letter-spacing: 0.12em;
+    color: rgba(96, 63, 24, 0.76);
+    text-transform: uppercase;
+    font-family: 'Courier New', monospace;
   }
 
   .selected-album-card,
@@ -1086,7 +1197,7 @@
   .drawer-actions {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 12px;
   }
 
   .selected-album-actions,
@@ -1100,19 +1211,72 @@
     padding-top: 2px;
   }
 
+  .selected-album-card {
+    position: relative;
+    overflow: hidden;
+    padding: 18px 18px 16px;
+    border-radius: 24px;
+    background:
+      linear-gradient(180deg, rgba(255, 250, 241, 0.96), rgba(241, 227, 198, 0.92)),
+      rgba(255, 248, 235, 0.82);
+    border: 1px solid rgba(133, 98, 49, 0.14);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.5),
+      inset 0 -14px 24px rgba(145, 104, 47, 0.05),
+      0 16px 28px rgba(92, 58, 20, 0.08);
+    isolation: isolate;
+  }
+
+  .selected-album-card::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background:
+      linear-gradient(180deg, rgba(255, 252, 247, 0.92), rgba(248, 240, 224, 0.84) 42%, rgba(239, 223, 194, 0.92)),
+      radial-gradient(circle at top right, rgba(255, 255, 255, 0.5), transparent 34%);
+  }
+
+  .selected-album-card.has-cover::before {
+    content: '';
+    position: absolute;
+    inset: -10%;
+    z-index: 0;
+    background-image: var(--selected-album-art);
+    background-size: cover;
+    background-position: center;
+    filter: blur(24px) saturate(0.72) brightness(1.08);
+    transform: scale(1.06);
+    opacity: 0.9;
+  }
+
+  .selected-album-shell,
+  .selected-album-copy,
+  .selected-album-actions,
+  .sidebar-side-panel {
+    position: relative;
+    z-index: 2;
+  }
+
   .selected-album-title,
   .drawer-title {
-    font-size: calc(14px * var(--app-font-scale));
+    font-size: calc(15px * var(--app-font-scale));
     font-weight: 700;
     color: #2f1c04;
+    letter-spacing: 0.01em;
   }
 
   .selected-album-headline {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     min-width: 0;
     flex-wrap: wrap;
+  }
+
+  .selected-album-shell {
+    display: block;
+    align-items: start;
   }
 
   .selected-album-badge {
@@ -1121,82 +1285,180 @@
     color: #6a4315;
   }
 
+  .selected-album-artist {
+    font-size: calc(11px * var(--app-font-scale));
+    line-height: 1.45;
+    color: rgba(86, 56, 18, 0.82);
+    font-style: italic;
+  }
+
+  .selected-album-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: calc(9px * var(--app-font-scale));
+    line-height: 1.5;
+    color: rgba(96, 63, 24, 0.8);
+    font-family: 'Courier New', monospace;
+  }
+
+  .selected-album-stats span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .selected-album-stats span::before {
+    content: '•';
+    color: rgba(120, 82, 31, 0.44);
+  }
+
+  .selected-album-stats span:first-child::before {
+    content: '';
+    display: none;
+  }
+
   .selected-album-meta {
     font-size: calc(10px * var(--app-font-scale));
-    line-height: 1.4;
-    color: #80613a;
+    line-height: 1.55;
+    color: #6d4c23;
   }
 
   .sidebar-side-panel {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding-top: 6px;
-    border-top: 1px solid rgba(133, 98, 49, 0.12);
+    gap: 12px;
+    padding: 14px 14px 12px;
+    border-radius: 22px;
+    background:
+      linear-gradient(180deg, rgba(247, 238, 220, 0.98), rgba(237, 220, 191, 0.94));
+    border: 1px solid rgba(133, 98, 49, 0.14);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 251, 244, 0.6),
+      inset 0 -18px 24px rgba(158, 114, 57, 0.05),
+      0 12px 22px rgba(98, 63, 22, 0.08);
   }
 
   .sidebar-side-head {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
+  }
+
+  .sidebar-side-kicker {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .sidebar-side-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(136, 95, 45, 0.1);
+    border: 1px solid rgba(136, 95, 45, 0.14);
+    color: #6c481b;
+    font-size: calc(8px * var(--app-font-scale));
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-family: 'Courier New', monospace;
   }
 
   .sidebar-side-picker {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 10px;
     align-items: baseline;
+    padding-bottom: 2px;
   }
 
   .side-chip {
-    border: 0;
-    border-radius: 0;
-    padding: 0 0 2px;
-    background: transparent;
+    border: 1px solid rgba(124, 86, 38, 0.12);
+    border-radius: 999px;
+    padding: 7px 10px 6px;
+    background: rgba(255, 248, 235, 0.72);
     color: #5a3a12;
-    font: inherit;
     font-size: calc(9px * var(--app-font-scale));
     cursor: pointer;
     letter-spacing: 0.14em;
     text-transform: uppercase;
-    opacity: 0.56;
-    box-shadow: inset 0 -1px 0 transparent;
+    opacity: 0.72;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.44);
+    font-family: 'Courier New', monospace;
   }
 
   .side-chip:hover {
-    opacity: 0.84;
+    opacity: 0.92;
   }
 
   .side-chip.active {
     color: #2f1c04;
     opacity: 1;
-    box-shadow: inset 0 -1px 0 rgba(92, 61, 23, 0.45);
+    background: linear-gradient(180deg, rgba(154, 111, 56, 0.18), rgba(255, 249, 239, 0.92));
+    border-color: rgba(124, 86, 38, 0.18);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.54),
+      0 8px 14px rgba(100, 63, 22, 0.08);
   }
 
   .sidebar-track-list {
     display: flex;
     flex-direction: column;
     gap: 0;
-    padding-top: 2px;
+    padding: 10px 12px 4px;
+    border-radius: 16px;
+    background:
+      repeating-linear-gradient(
+        180deg,
+        rgba(147, 108, 55, 0.06) 0,
+        rgba(147, 108, 55, 0.06) 1px,
+        transparent 1px,
+        transparent 34px
+      ),
+      linear-gradient(180deg, rgba(250, 244, 230, 0.98), rgba(245, 234, 211, 0.94));
+    border: 1px solid rgba(137, 99, 47, 0.12);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 251, 244, 0.82),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  }
+
+  .sidebar-track-list-head {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 0 0 8px;
+    border-bottom: 1px solid rgba(124, 86, 38, 0.18);
+    font-size: calc(8px * var(--app-font-scale));
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: rgba(108, 73, 31, 0.78);
+    font-family: 'Courier New', monospace;
   }
 
   .sidebar-track {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 7px;
+    gap: 10px;
     align-items: center;
-    padding: 7px 0;
-    border-bottom: 1px dotted rgba(127, 98, 57, 0.24);
+    padding: 10px 0;
+    border-bottom: 1px dotted rgba(127, 98, 57, 0.2);
   }
 
   .sidebar-track.playing {
+    padding-inline: 4px;
+    margin-inline: -4px;
     border-bottom-color: rgba(94, 63, 24, 0.34);
+    background: linear-gradient(90deg, rgba(156, 114, 58, 0.12), rgba(255, 248, 238, 0.28), rgba(156, 114, 58, 0.06));
+    border-radius: 8px;
   }
 
   .sidebar-track-num,
   .sidebar-track-duration {
     font-size: calc(9px * var(--app-font-scale));
     color: #8c6d42;
+    font-family: 'Courier New', monospace;
   }
 
   .sidebar-track-title {
@@ -1205,13 +1467,20 @@
     overflow: hidden;
     text-overflow: ellipsis;
     color: #4a2e0c;
-    font-size: calc(10px * var(--app-font-scale));
-    line-height: 1.3;
+    font-size: calc(11px * var(--app-font-scale));
+    line-height: 1.35;
   }
 
   .sidebar-track.playing .sidebar-track-title {
     color: #241300;
     font-weight: 700;
+  }
+
+  .side-helper {
+    padding: 14px 16px;
+    border-radius: 16px;
+    background: rgba(252, 244, 230, 0.68);
+    border: 1px dashed rgba(136, 95, 45, 0.18);
   }
 
   .title-editor {
@@ -1235,6 +1504,7 @@
     background: #3d6b53;
     color: #eef8f0;
     font-size: calc(12px * var(--app-font-scale));
+    font-family: 'Courier New', monospace;
   }
 
   .danger-btn,
@@ -1324,6 +1594,7 @@
     background: rgba(255, 251, 246, 0.9);
     color: #613c12;
     font-size: calc(12px * var(--app-font-scale));
+    font-family: 'Courier New', monospace;
   }
 
   .turntable-panel {
@@ -1349,7 +1620,7 @@
 
   @media (max-width: 1180px) {
     .studio {
-      grid-template-columns: minmax(262px, 304px) minmax(0, 1fr);
+      grid-template-columns: minmax(302px, 344px) minmax(0, 1fr);
     }
 
     .turntable-panel {

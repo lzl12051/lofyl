@@ -15,6 +15,7 @@ struct AudioSourceEntry {
   path: String,
   display_path: String,
   title: String,
+  artist: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,18 +98,45 @@ fn fallback_track_title(path: &Path) -> String {
   strip_track_number_prefix(&strip_extension(&display_name_for_path(path)))
 }
 
-fn normalize_metadata_title(raw: &str) -> Option<String> {
+fn normalize_metadata_text(raw: &str) -> Option<String> {
   let trimmed = raw.trim();
   if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(null)") || trimmed.eq_ignore_ascii_case("null") {
     return None;
   }
-  Some(trimmed.to_owned())
+
+  Some(trimmed.trim_matches('"').to_owned())
+}
+
+fn normalize_metadata_list(raw: &str) -> Option<String> {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(null)") || trimmed.eq_ignore_ascii_case("null") {
+    return None;
+  }
+
+  if trimmed.starts_with('(') && trimmed.ends_with(')') {
+    let values = trimmed
+      .lines()
+      .map(str::trim)
+      .filter(|line| !line.is_empty() && *line != "(" && *line != ")")
+      .map(|line| line.trim_end_matches(',').trim().trim_matches('"'))
+      .filter(|line| !line.is_empty())
+      .map(ToOwned::to_owned)
+      .collect::<Vec<_>>();
+
+    if values.is_empty() {
+      return None;
+    }
+
+    return Some(values.join(", "));
+  }
+
+  normalize_metadata_text(trimmed)
 }
 
 #[cfg(target_os = "macos")]
-fn read_metadata_title(path: &Path) -> Option<String> {
+fn read_mdls_value(path: &Path, key: &str) -> Option<String> {
   let output = Command::new("mdls")
-    .args(["-name", "kMDItemTitle", "-raw"])
+    .args(["-name", key, "-raw"])
     .arg(path)
     .output()
     .ok()?;
@@ -117,7 +145,17 @@ fn read_metadata_title(path: &Path) -> Option<String> {
     return None;
   }
 
-  normalize_metadata_title(&String::from_utf8_lossy(&output.stdout))
+  Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn read_metadata_title(path: &Path) -> Option<String> {
+  normalize_metadata_text(&read_mdls_value(path, "kMDItemTitle")?)
+}
+
+#[cfg(target_os = "macos")]
+fn read_metadata_artist(path: &Path) -> Option<String> {
+  normalize_metadata_list(&read_mdls_value(path, "kMDItemAuthors")?)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -125,14 +163,22 @@ fn read_metadata_title(_path: &Path) -> Option<String> {
   None
 }
 
-fn resolve_track_title_for_path(path: &Path) -> String {
-  read_metadata_title(path).unwrap_or_else(|| fallback_track_title(path))
+#[cfg(not(target_os = "macos"))]
+fn read_metadata_artist(_path: &Path) -> Option<String> {
+  None
+}
+
+fn resolve_track_metadata_for_path(path: &Path) -> (String, String) {
+  (
+    read_metadata_title(path).unwrap_or_else(|| fallback_track_title(path)),
+    read_metadata_artist(path).unwrap_or_default(),
+  )
 }
 
 fn load_track_title(source_path: &str, stored_title: &str) -> String {
   let path = Path::new(source_path);
   if path.exists() {
-    return resolve_track_title_for_path(path);
+    return resolve_track_metadata_for_path(path).0;
   }
 
   if stored_title.trim().is_empty() {
@@ -140,6 +186,18 @@ fn load_track_title(source_path: &str, stored_title: &str) -> String {
   } else {
     stored_title.to_owned()
   }
+}
+
+fn load_track_artist(source_path: &str, stored_artist: &str) -> String {
+  let path = Path::new(source_path);
+  if path.exists() {
+    let metadata_artist = resolve_track_metadata_for_path(path).1;
+    if !metadata_artist.trim().is_empty() {
+      return metadata_artist;
+    }
+  }
+
+  stored_artist.to_owned()
 }
 
 fn collect_audio_entries(dir: &Path, root: &Path, entries: &mut Vec<AudioSourceEntry>) -> Result<(), String> {
@@ -167,11 +225,13 @@ fn collect_audio_entries(dir: &Path, root: &Path, entries: &mut Vec<AudioSourceE
         .unwrap_or(&path)
         .to_string_lossy()
         .replace('\\', "/");
+      let (title, artist) = resolve_track_metadata_for_path(&path);
 
       entries.push(AudioSourceEntry {
         path: path_to_string(&path),
         display_path: relative,
-        title: resolve_track_title_for_path(&path),
+        title,
+        artist,
       });
     }
   }
@@ -295,7 +355,7 @@ fn load_album_tracks(conn: &Connection, album_id: &str) -> Result<Vec<Vec<Librar
     sides[side_index].push(LibraryTrack {
       id: source_path.clone(),
       title: load_track_title(&source_path, &title),
-      artist,
+      artist: load_track_artist(&source_path, &artist),
       duration,
       source_path,
       source_display_path,
@@ -381,10 +441,15 @@ fn pick_audio_files() -> Result<Option<AudioImportSelection>, String> {
   let mut entries = paths
     .into_iter()
     .filter(|path| is_supported_audio_path(path))
-    .map(|path| AudioSourceEntry {
-      display_path: display_name_for_path(&path),
-      path: path_to_string(&path),
-      title: resolve_track_title_for_path(&path),
+    .map(|path| {
+      let (title, artist) = resolve_track_metadata_for_path(&path);
+
+      AudioSourceEntry {
+        display_path: display_name_for_path(&path),
+        path: path_to_string(&path),
+        title,
+        artist,
+      }
     })
     .collect::<Vec<_>>();
 
