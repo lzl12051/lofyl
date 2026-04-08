@@ -126,9 +126,12 @@
   }
 
   function bindEngineCallbacks(targetEngine: VinylEngine) {
+    targetEngine.setSpectrumBandCount(MUSIC_METER_BANDS);
     targetEngine.onTimeUpdate = (time) => {
       currentTime = time;
-      musicMeterLevels = targetEngine.getVisualLevels(MUSIC_METER_BANDS);
+    };
+    targetEngine.onSpectrumUpdate = (levels) => {
+      musicMeterLevels = levels;
     };
 
     targetEngine.onSideEnded = () => {
@@ -234,6 +237,11 @@
     }
 
     await persistAlbum(renameLibraryAlbum(selectedAlbum, trimmedTitle));
+  }
+
+  async function saveCurrentAlbumTitleAndClose() {
+    await saveCurrentAlbumTitle();
+    closeEditor();
   }
 
   async function selectAlbumById(albumId: string) {
@@ -518,25 +526,31 @@
         <div class="library-shell">
           <div class="panel-head library-marquee">
             <div class="panel-title-block">
-              <div class="eyebrow">LOFYL</div>
+              <div class="eyebrow">LOFI VINYL LIBRARY</div>
               <h1 class="panel-title">LOFYL</h1>
             </div>
 
             <div class="panel-toolbar" aria-label="导入新专辑与曲库控制">
               {#if isDesktopApp}
                 <button
-                  class="mini-btn"
+                  class="text-action"
                   type="button"
                   on:click={() => void importAlbum("files", "new")}
                 >
                   导入文件
                 </button>
                 <button
-                  class="mini-btn"
+                  class="text-action"
                   type="button"
                   on:click={() => void importAlbum("folder", "new")}
                 >
                   导入文件夹
+                </button>
+              {/if}
+
+              {#if selectedAlbum}
+                <button class="text-action" type="button" on:click={openEditor}>
+                  编辑
                 </button>
               {/if}
 
@@ -546,7 +560,7 @@
                 on:click={toggleLibraryPanel}
                 aria-label="切换库面板"
               >
-                隐藏库
+                收起
               </button>
             </div>
           </div>
@@ -555,114 +569,112 @@
             <p class="error">{loadError}</p>
           {/if}
 
-          <div class="section focus-section">
+          <section class="section library-section now-playing-section">
             {#if selectedAlbum}
-              <div
-                class="selected-album-card"
-                class:has-cover={Boolean(selectedAlbum.coverUrl)}
-                style={selectedAlbum.coverUrl
-                  ? `--selected-album-art: url("${selectedAlbum.coverUrl}")`
-                  : undefined}
-              >
-                <div class="selected-album-shell">
-                  <div class="selected-album-copy">
-                    <div class="section-label">当前专辑</div>
-                    <div class="selected-album-headline">
-                      <span class="selected-album-title"
-                        >{selectedAlbum.title}</span
-                      >
-                      <span class="selected-album-badge">当前专辑</span>
-                    </div>
-                    <span class="selected-album-artist"
-                      >{selectedAlbum.artist || "未署名艺人"}</span
-                    >
-                    <div class="selected-album-stats">
-                      <span
-                        >{playbackAlbum?.discs ?? Math.ceil(selectedAlbum.sides.length / 2)} 张碟</span
-                      >
-                      <span>{playbackAlbum?.sides.length ?? selectedAlbum.sides.length} 面</span>
-                      <span>{countAlbumTracks(selectedAlbum)} 首</span>
-                      <span>{formatTime(getAlbumDuration(selectedAlbum))}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="selected-album-actions">
-                  <button
-                    class="primary-btn"
-                    type="button"
-                    on:click={openEditor}
-                  >
-                    编辑专辑
-                  </button>
-                </div>
-
-                {#if playbackAlbum && currentSide}
-                  <div class="sidebar-side-panel">
-                    <div class="sidebar-side-head">
-                      <div class="sidebar-side-kicker">
-                        <span class="section-label">当前盘面</span>
-                        <span class="sidebar-side-badge"
-                          >Side {currentSide.label}</span
-                        >
-                      </div>
-                      <span class="selected-album-meta">
-                        {currentSide.tracks.length} 首曲目 · 总时长 {formatTime(
-                          currentSide.totalDuration,
-                        )}
-                      </span>
-                    </div>
-
-                    <div class="sidebar-side-picker">
-                      {#each playbackAlbum.sides as side, index}
-                        <button
-                          class="side-chip"
-                          class:active={index === currentSideIndex}
-                          type="button"
-                          on:click={() => void switchSide(index)}
-                        >
-                          Side {side.label}
-                        </button>
-                      {/each}
-                    </div>
-
-                    <div class="sidebar-track-list">
-                      <div class="sidebar-track-list-head" aria-hidden="true">
-                        <span>Track</span>
-                        <span>Title</span>
-                        <span>Time</span>
-                      </div>
-                      {#each currentSide.tracks as track, index}
-                        <div
-                          class="sidebar-track"
-                          class:playing={isCurrentTrack(
-                            currentSide,
-                            index,
-                            currentTime,
-                          )}
-                        >
-                          <span class="sidebar-track-num"
-                            >{String(index + 1).padStart(2, "0")}</span
-                          >
-                          <span class="sidebar-track-title">{track.title}</span>
-                          <span class="sidebar-track-duration"
-                            >{formatTime(track.duration)}</span
-                          >
-                        </div>
-                      {/each}
-                    </div>
-                  </div>
-                {:else}
-                  <p class="helper side-helper">当前专辑还没有可播放的盘面。</p>
-                {/if}
+              <div class="section-head">
+                <span class="section-label">当前专辑</span>
               </div>
+
+              <div class="selected-album-sheet">
+                {#if selectedAlbum.coverUrl}
+                  <img
+                    class="selected-album-cover"
+                    src={selectedAlbum.coverUrl}
+                    alt={`${selectedAlbum.title} 封面`}
+                  />
+                {/if}
+
+                <div class="selected-album-copy">
+                  <div class="selected-album-title">{selectedAlbum.title}</div>
+                  <div class="selected-album-artist">
+                    {selectedAlbum.artist || "未署名艺人"}
+                  </div>
+                  <div class="selected-album-stats">
+                    <span
+                      >{playbackAlbum?.discs ?? Math.ceil(selectedAlbum.sides.length / 2)} 张碟</span
+                    >
+                    <span>{playbackAlbum?.sides.length ?? selectedAlbum.sides.length} 面</span>
+                    <span>{countAlbumTracks(selectedAlbum)} 首</span>
+                    <span>{formatTime(getAlbumDuration(selectedAlbum))}</span>
+                  </div>
+
+                  <div class="selected-album-actions">
+                    <button class="text-action" type="button" on:click={openEditor}>
+                      编辑专辑
+                    </button>
+                    {#if isDesktopApp}
+                      <button
+                        class="text-action"
+                        type="button"
+                        on:click={() => void importAlbum("files", "current")}
+                      >
+                        追加文件
+                      </button>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+
+              {#if playbackAlbum && currentSide}
+                <div class="side-sheet">
+                  <div class="side-sheet-head">
+                    <div class="section-label">当前盘面</div>
+                    <div class="selected-album-meta">
+                      Side {currentSide.label} · {currentSide.tracks.length} 首 ·
+                      {formatTime(currentSide.totalDuration)}
+                    </div>
+                  </div>
+
+                  <div class="sidebar-side-picker" aria-label="切换盘面">
+                    {#each playbackAlbum.sides as side, index}
+                      <button
+                        class="side-link"
+                        class:active={index === currentSideIndex}
+                        type="button"
+                        on:click={() => void switchSide(index)}
+                        aria-current={index === currentSideIndex ? "true" : undefined}
+                      >
+                        {side.label}
+                      </button>
+                    {/each}
+                  </div>
+
+                  <div class="sidebar-track-list">
+                    <div class="sidebar-track-list-head" aria-hidden="true">
+                      <span>Track</span>
+                      <span>Title</span>
+                      <span>Time</span>
+                    </div>
+                    {#each currentSide.tracks as track, index}
+                      <div
+                        class="sidebar-track"
+                        class:playing={isCurrentTrack(
+                          currentSide,
+                          index,
+                          currentTime,
+                        )}
+                      >
+                        <span class="sidebar-track-num"
+                          >{String(index + 1).padStart(2, "0")}</span
+                        >
+                        <span class="sidebar-track-title">{track.title}</span>
+                        <span class="sidebar-track-duration"
+                          >{formatTime(track.duration)}</span
+                        >
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {:else}
+                <p class="helper side-helper">当前专辑还没有可播放的盘面。</p>
+              {/if}
             {:else}
               <p class="empty-state">先导入一张专辑。</p>
             {/if}
-          </div>
+          </section>
 
-          <div class="section catalog-section">
-            <div class="catalog-head">
+          <section class="section library-section catalog-section">
+            <div class="section-head catalog-head">
               <div class="section-label">专辑目录</div>
               <span class="catalog-count">{libraryAlbums.length} 张收藏</span>
             </div>
@@ -680,23 +692,20 @@
                     on:click={() => void selectAlbumById(item.id)}
                     type="button"
                   >
-                    <span class="album-card-index"
-                      >{String(index + 1).padStart(2, "0")}</span
-                    >
+                    <span class="album-card-index">
+                      {String(index + 1).padStart(2, "0")}
+                    </span>
                     <span class="album-card-copy">
                       <span class="album-card-title">{item.title}</span>
                       <span class="album-card-meta">
                         {pb.discs} 张碟 · {pb.sides.length} 面 · {countAlbumTracks(item)} 首
                       </span>
                     </span>
-                    {#if item.id === selectedAlbumId}
-                      <span class="album-card-badge">Playing Shelf</span>
-                    {/if}
                   </button>
                 {/each}
               </div>
             {/if}
-          </div>
+          </section>
         </div>
       {:else}
         <button
@@ -712,7 +721,7 @@
       {#if libraryPanelVisible && selectedAlbum && isEditorOpen}
         <section class="editor-drawer" aria-label="专辑编辑器">
           <div class="arranger-head">
-            <div>
+            <div class="drawer-title-block">
               <div class="section-label">专辑编辑</div>
               <div class="drawer-title">{selectedAlbum.title}</div>
               <div class="arranger-meta">
@@ -724,7 +733,7 @@
             </div>
 
             <button
-              class="ghost-btn close-btn"
+              class="text-action close-btn"
               type="button"
               on:click={closeEditor}
             >
@@ -733,39 +742,45 @@
           </div>
 
           <div class="title-editor">
-            <input
-              class="title-input"
-              bind:value={albumTitleDraft}
-              placeholder="专辑名称"
-              on:blur={() => void saveCurrentAlbumTitle()}
-            />
-            <button
-              class="save-btn"
-              type="button"
-              on:click={() => void saveCurrentAlbumTitle()}
-            >
-              保存标题
-            </button>
+            <label class="title-editor-label" for="album-title-input">
+              标题
+            </label>
+            <div class="title-editor-field">
+              <input
+                id="album-title-input"
+                class="title-input"
+                bind:value={albumTitleDraft}
+                placeholder="专辑名称"
+                on:blur={() => void saveCurrentAlbumTitle()}
+              />
+              <button
+                class="save-btn"
+                type="button"
+                on:click={() => void saveCurrentAlbumTitleAndClose()}
+              >
+                保存
+              </button>
+            </div>
           </div>
 
           {#if isDesktopApp}
             <div class="drawer-actions">
               <button
-                class="ghost-btn"
+                class="text-action"
                 type="button"
                 on:click={() => void importAlbum("files", "current")}
               >
                 追加文件到当前专辑
               </button>
               <button
-                class="ghost-btn"
+                class="text-action"
                 type="button"
                 on:click={() => void importAlbum("folder", "current")}
               >
                 追加文件夹到当前专辑
               </button>
               <button
-                class="danger-btn"
+                class="text-action danger-btn"
                 type="button"
                 on:click={() => void deleteCurrentAlbum()}
               >
@@ -803,6 +818,7 @@
 
                         <div class="editor-track-tools">
                           <button
+                            class="editor-track-tool"
                             type="button"
                             on:click={() =>
                               void moveTrack(sideIndex, trackIndex, "up")}
@@ -810,6 +826,7 @@
                             ↑
                           </button>
                           <button
+                            class="editor-track-tool"
                             type="button"
                             on:click={() =>
                               void moveTrack(sideIndex, trackIndex, "down")}
@@ -817,6 +834,7 @@
                             ↓
                           </button>
                           <button
+                            class="editor-track-tool"
                             type="button"
                             disabled={sideIndex === 0}
                             on:click={() =>
@@ -825,6 +843,7 @@
                             ←
                           </button>
                           <button
+                            class="editor-track-tool"
                             type="button"
                             on:click={() =>
                               void moveTrack(sideIndex, trackIndex, "right")}
@@ -833,7 +852,7 @@
                           </button>
                           <button
                             type="button"
-                            class="danger-icon"
+                            class="editor-track-tool danger-icon"
                             on:click={() =>
                               void removeTrack(sideIndex, trackIndex)}
                           >
@@ -909,12 +928,12 @@
   :global(body) {
     background: radial-gradient(
         circle at top left,
-        rgba(255, 245, 221, 0.95),
-        transparent 36%
+        rgba(255, 245, 221, 0.82),
+        transparent 34%
       ),
-      linear-gradient(135deg, #e9dcc5 0%, #d8c4a1 45%, #c4ab82 100%);
+      linear-gradient(135deg, #ece2cf 0%, #dbc8a8 46%, #c6ae86 100%);
     color: #2e1e0a;
-    font-family: "Courier New", monospace;
+    font-family: Georgia, "Times New Roman", serif;
     overflow: hidden;
   }
 
@@ -934,6 +953,10 @@
     border-radius: 0 10px 10px 0;
   }
 
+  main.desktop-overlay-shell .editor-drawer {
+    padding-top: 72px;
+  }
+
   .titlebar-drag-region {
     position: fixed;
     top: 0;
@@ -945,11 +968,12 @@
 
   .studio {
     display: grid;
-    grid-template-columns: minmax(344px, 392px) minmax(0, 1fr);
+    grid-template-columns: minmax(288px, 320px) minmax(0, 1fr);
     height: 100%;
     min-width: 0;
     min-height: 0;
   }
+
   .studio.collapsed-layout {
     grid-template-columns: minmax(60px, 80px) minmax(0, 1fr);
   }
@@ -958,28 +982,29 @@
     position: relative;
     display: flex;
     flex-direction: column;
-    padding: 18px 16px 16px 12px;
-    border-right: 1px solid rgba(110, 73, 30, 0.2);
-    background: linear-gradient(
+    padding: 20px 14px 14px 12px;
+    border-right: 1px solid rgba(99, 68, 30, 0.18);
+    background:
+      linear-gradient(180deg, rgba(253, 249, 241, 0.94), rgba(239, 226, 201, 0.92)),
+      repeating-linear-gradient(
         180deg,
-        rgba(253, 248, 238, 0.6),
-        rgba(216, 192, 153, 0.22)
-      ),
-      linear-gradient(145deg, rgba(121, 84, 43, 0.3), rgba(81, 51, 24, 0.08)),
-      linear-gradient(180deg, #cfb189 0%, #b38e64 100%);
-    backdrop-filter: blur(12px);
+        rgba(132, 95, 43, 0.03) 0,
+        rgba(132, 95, 43, 0.03) 1px,
+        transparent 1px,
+        transparent 32px
+      );
     min-width: 0;
     min-height: 0;
     overflow: hidden;
     box-shadow:
-      inset 0 1px 0 rgba(255, 247, 233, 0.32),
-      inset -1px 0 0 rgba(84, 54, 22, 0.14),
-      18px 0 40px rgba(83, 53, 22, 0.14);
-    font-family: Georgia, "Times New Roman", serif;
+      inset -1px 0 0 rgba(85, 57, 24, 0.12),
+      12px 0 28px rgba(83, 53, 22, 0.08);
   }
+
   .library-panel.collapsed .library-shell {
     display: none;
   }
+
   .library-panel.collapsed {
     background: transparent;
     border-right: none;
@@ -1000,7 +1025,7 @@
   .editor-drawer {
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 18px;
     min-width: 0;
     min-height: 0;
   }
@@ -1011,24 +1036,27 @@
     gap: 18px;
     padding-right: 8px;
     scrollbar-width: thin;
-    scrollbar-color: rgba(126, 94, 47, 0.34) transparent;
+    scrollbar-color: rgba(126, 94, 47, 0.28) transparent;
   }
 
   .editor-drawer {
     position: absolute;
     inset: 0;
     z-index: 2;
-    padding: 18px 14px 16px 12px;
+    padding: 22px 16px 18px 14px;
     overflow-y: auto;
-    background: linear-gradient(
+    background:
+      linear-gradient(180deg, rgba(253, 249, 241, 0.98), rgba(242, 229, 204, 0.99)),
+      repeating-linear-gradient(
         180deg,
-        rgba(255, 251, 243, 0.96),
-        rgba(235, 220, 194, 0.98)
-      ),
-      rgba(229, 213, 184, 0.99);
-    box-shadow: 18px 0 36px rgba(84, 52, 18, 0.16);
+        rgba(132, 95, 43, 0.03) 0,
+        rgba(132, 95, 43, 0.03) 1px,
+        transparent 1px,
+        transparent 30px
+      );
+    box-shadow: 12px 0 28px rgba(84, 52, 18, 0.12);
     scrollbar-width: thin;
-    scrollbar-color: rgba(126, 94, 47, 0.34) transparent;
+    scrollbar-color: rgba(126, 94, 47, 0.28) transparent;
   }
 
   .library-shell::-webkit-scrollbar,
@@ -1043,22 +1071,14 @@
 
   .library-shell::-webkit-scrollbar-thumb,
   .editor-drawer::-webkit-scrollbar-thumb {
-    background: linear-gradient(
-      180deg,
-      rgba(148, 111, 60, 0.34),
-      rgba(104, 73, 34, 0.42)
-    );
+    background: rgba(112, 79, 37, 0.24);
     border-radius: 999px;
-    border: 1px solid rgba(255, 247, 233, 0.48);
+    border: 1px solid rgba(255, 247, 233, 0.36);
   }
 
   .library-shell::-webkit-scrollbar-thumb:hover,
   .editor-drawer::-webkit-scrollbar-thumb:hover {
-    background: linear-gradient(
-      180deg,
-      rgba(148, 111, 60, 0.46),
-      rgba(104, 73, 34, 0.56)
-    );
+    background: rgba(112, 79, 37, 0.38);
   }
 
   .panel-head,
@@ -1076,20 +1096,9 @@
   }
 
   .library-marquee {
-    gap: 14px;
-    padding: 16px 16px 14px;
-    border-radius: 24px;
-    background: linear-gradient(
-      180deg,
-      rgba(93, 58, 25, 0.18),
-      rgba(255, 247, 233, 0.2) 24%,
-      rgba(255, 245, 228, 0.78) 100%
-    );
-    border: 1px solid rgba(116, 78, 33, 0.16);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 252, 246, 0.52),
-      inset 0 -10px 20px rgba(153, 111, 56, 0.06),
-      0 16px 30px rgba(94, 59, 23, 0.12);
+    gap: 8px;
+    padding: 0 0 16px;
+    border-bottom: 1px solid rgba(108, 76, 36, 0.24);
   }
 
   .turntable-status-bar {
@@ -1102,22 +1111,23 @@
 
   .eyebrow {
     font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.22em;
-    color: #8a6a3c;
+    letter-spacing: 0.24em;
+    color: #86663a;
     text-transform: uppercase;
     font-family: "Courier New", monospace;
   }
 
   .panel-title {
-    font-size: calc(18px * var(--app-font-scale));
-    line-height: 1.2;
-    color: #2a1802;
+    font-size: calc(16px * var(--app-font-scale));
+    line-height: 1.1;
+    color: #241507;
+    font-weight: 700;
   }
 
   .panel-title-block {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 5px;
     min-width: 0;
   }
 
@@ -1126,19 +1136,20 @@
     flex-wrap: wrap;
     align-items: center;
     justify-content: flex-start;
-    gap: 8px;
+    gap: 12px;
     padding-top: 2px;
   }
 
   .status-pill {
     white-space: nowrap;
-    border: 1px solid rgba(126, 94, 47, 0.28);
+    border: 1px solid rgba(126, 94, 47, 0.22);
     border-radius: 999px;
     padding: 5px 9px;
-    background: rgba(255, 250, 240, 0.62);
-    color: #7c6036;
+    background: rgba(255, 250, 240, 0.52);
+    color: #71562e;
     font-size: calc(9px * var(--app-font-scale));
     letter-spacing: 0.08em;
+    font-family: "Courier New", monospace;
   }
 
   .section {
@@ -1149,116 +1160,65 @@
 
   .section-label {
     font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.16em;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
-    color: #8d6b3d;
+    color: #846337;
     font-family: "Courier New", monospace;
   }
 
-  .mini-btn,
-  .primary-btn,
-  .ghost-btn,
-  .save-btn,
-  .danger-btn,
-  .album-card,
-  .editor-track-tools button {
-    font-family: inherit;
-    border: 0;
-    border-radius: 10px;
-    cursor: pointer;
-    transition:
-      transform 0.14s ease,
-      background 0.14s ease,
-      opacity 0.14s ease;
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
   }
 
-  .mini-btn {
-    min-height: 30px;
-    padding: 7px 12px;
-    border: 1px solid rgba(120, 84, 38, 0.18);
-    background: linear-gradient(
-      180deg,
-      rgba(255, 250, 243, 0.96),
-      rgba(244, 229, 202, 0.88)
-    );
-    color: #5b3a12;
-    font-size: calc(10px * var(--app-font-scale));
-    letter-spacing: 0.08em;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.6),
-      0 6px 12px rgba(106, 69, 29, 0.08);
-    font-family: "Courier New", monospace;
-  }
-
+  .text-action,
   .toggle-library-btn {
-    min-height: 30px;
-    padding: 7px 12px;
-    border: 1px solid rgba(120, 84, 38, 0.18);
-    background: linear-gradient(
-      180deg,
-      rgba(255, 250, 243, 0.96),
-      rgba(244, 229, 202, 0.88)
-    );
+    border: 0;
+    padding: 0;
+    background: transparent;
     color: #5b3a12;
-    font-size: calc(10px * var(--app-font-scale));
-    letter-spacing: 0.08em;
-    border-radius: 10px;
+    font-size: calc(9px * var(--app-font-scale));
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
     cursor: pointer;
     transition:
-      transform 0.14s ease,
-      background 0.14s ease,
+      color 0.14s ease,
       opacity 0.14s ease;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.6),
-      0 6px 12px rgba(106, 69, 29, 0.08);
     font-family: "Courier New", monospace;
+    text-decoration: none;
   }
 
-  .primary-btn,
-  .ghost-btn {
-    min-height: 34px;
-    padding: 8px 14px;
-    font-size: calc(10px * var(--app-font-scale));
+  .text-action:hover,
+  .toggle-library-btn:hover {
+    color: #2b1905;
   }
 
-  .primary-btn {
-    background: linear-gradient(180deg, #9e7242, #7d5328);
-    color: #fff5e7;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 244, 223, 0.35),
-      0 10px 18px rgba(92, 55, 18, 0.16);
-    font-family: "Courier New", monospace;
-  }
-
-  .ghost-btn {
-    border: 1px solid rgba(133, 98, 49, 0.16);
-    background: linear-gradient(
-      180deg,
-      rgba(255, 250, 242, 0.92),
-      rgba(245, 232, 208, 0.86)
-    );
-    color: #553712;
-    font-family: "Courier New", monospace;
-  }
-
-  .mini-btn:disabled,
-  .primary-btn:disabled,
-  .ghost-btn:disabled,
-  .save-btn:disabled,
-  .danger-btn:disabled,
-  .editor-track-tools button:disabled {
+  .text-action:disabled {
     opacity: 0.4;
     cursor: default;
   }
 
-  .mini-btn:not(:disabled):hover,
-  .primary-btn:not(:disabled):hover,
-  .ghost-btn:not(:disabled):hover,
-  .save-btn:not(:disabled):hover,
-  .danger-btn:not(:disabled):hover,
-  .album-card:hover,
-  .editor-track-tools button:not(:disabled):hover {
-    transform: translateY(-1px);
+  .toggle-library-btn {
+    margin-left: auto;
+  }
+
+  .collapsed-toggle-btn {
+    writing-mode: vertical-rl;
+    letter-spacing: 0.18em;
+    margin-left: 0;
+    padding-top: 8px;
+  }
+
+  .library-section {
+    padding-top: 14px;
+    border-top: 1px solid rgba(108, 76, 36, 0.18);
+  }
+
+  .now-playing-section {
+    padding-top: 0;
+    border-top: none;
   }
 
   .helper,
@@ -1267,265 +1227,46 @@
   .empty-state {
     font-size: calc(10px * var(--app-font-scale));
     line-height: 1.6;
-    color: #80613a;
+    color: #7d5f36;
   }
 
   .error {
-    color: #af2f2f;
+    color: #9e3225;
     font-size: calc(10px * var(--app-font-scale));
-    line-height: 1.45;
-    padding: 10px 12px;
-    border-radius: 12px;
-    background: rgba(255, 245, 241, 0.72);
-    border: 1px solid rgba(175, 47, 47, 0.12);
+    line-height: 1.55;
+    padding: 10px 0 0;
   }
 
-  .album-list,
-  .side-editor-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    min-width: 0;
-  }
-
-  .album-card {
+  .selected-album-sheet {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 12px;
-    padding: 14px 14px 13px;
-    border-radius: 18px;
-    background: linear-gradient(
-        180deg,
-        rgba(255, 252, 246, 0.94),
-        rgba(243, 229, 205, 0.9)
-      ),
-      rgba(255, 251, 244, 0.62);
-    border: 1px solid rgba(133, 98, 49, 0.12);
-    color: #4c3210;
-    text-align: left;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.52),
-      0 10px 18px rgba(96, 59, 17, 0.06);
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 14px;
+    align-items: start;
   }
 
-  .album-card.active {
-    background: linear-gradient(
-        90deg,
-        rgba(146, 105, 50, 0.2),
-        rgba(255, 248, 238, 0.98) 18%
-      ),
-      linear-gradient(
-        180deg,
-        rgba(255, 252, 246, 0.98),
-        rgba(241, 226, 198, 0.92)
-      );
-    color: #2f1c04;
-    border-color: rgba(133, 98, 49, 0.14);
-    box-shadow:
-      inset 4px 0 0 rgba(120, 82, 31, 0.82),
-      inset 0 1px 0 rgba(255, 255, 255, 0.58),
-      0 14px 24px rgba(96, 59, 17, 0.1);
+  .selected-album-cover {
+    width: 64px;
+    height: 64px;
+    object-fit: cover;
+    border: 1px solid rgba(98, 69, 31, 0.12);
+    filter: saturate(0.82) contrast(0.94);
+    box-shadow: 0 4px 14px rgba(89, 56, 22, 0.08);
   }
 
-  .album-card-index {
-    align-self: flex-start;
-    padding-top: 1px;
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.18em;
-    color: rgba(108, 73, 31, 0.72);
-    font-family: "Courier New", monospace;
-  }
-
-  .album-card-copy {
+  .selected-album-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .album-card-title {
-    font-size: calc(13px * var(--app-font-scale));
-    font-weight: 700;
-    line-height: 1.25;
-  }
-
-  .album-card-badge,
-  .selected-album-badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 2px 6px;
-    border-radius: 999px;
-    font-size: calc(8px * var(--app-font-scale));
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    font-family: "Courier New", monospace;
-  }
-
-  .album-card-badge {
-    justify-self: flex-end;
-    background: rgba(122, 81, 34, 0.08);
-    border: 1px solid rgba(122, 81, 34, 0.12);
-    color: #6a4315;
-    white-space: nowrap;
-  }
-
-  .album-card-meta {
-    font-size: calc(9px * var(--app-font-scale));
-    line-height: 1.5;
-    color: rgba(87, 57, 20, 0.78);
-  }
-
-  .focus-section {
-    padding: 18px 17px 16px;
-    border-radius: 28px;
-    background: linear-gradient(
-        180deg,
-        rgba(255, 252, 247, 0.95),
-        rgba(242, 228, 201, 0.92)
-      ),
-      rgba(255, 248, 235, 0.7);
-    border: 1px solid rgba(133, 98, 49, 0.14);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.52),
-      inset 0 -18px 24px rgba(145, 104, 47, 0.05),
-      0 18px 30px rgba(118, 83, 34, 0.1);
-  }
-
-  .catalog-section {
-    padding: 16px 15px 14px;
-    border-radius: 24px;
-    background: linear-gradient(
-        180deg,
-        rgba(246, 234, 211, 0.92),
-        rgba(231, 210, 176, 0.9)
-      ),
-      rgba(239, 224, 197, 0.82);
-    border: 1px solid rgba(131, 92, 41, 0.14);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 249, 239, 0.42),
-      inset 0 -12px 20px rgba(118, 83, 34, 0.04),
-      0 14px 24px rgba(101, 65, 24, 0.08);
-  }
-
-  .catalog-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .catalog-count {
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.12em;
-    color: rgba(96, 63, 24, 0.76);
-    text-transform: uppercase;
-    font-family: "Courier New", monospace;
-  }
-
-  .selected-album-card,
-  .selected-album-copy,
-  .selected-album-actions,
-  .drawer-actions {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .selected-album-actions,
-  .drawer-actions {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: flex-start;
-  }
-
-  .selected-album-actions {
-    padding-top: 2px;
-  }
-
-  .selected-album-card {
-    position: relative;
-    overflow: hidden;
-    padding: 18px 18px 16px;
-    border-radius: 24px;
-    background: linear-gradient(
-        180deg,
-        rgba(255, 250, 241, 0.96),
-        rgba(241, 227, 198, 0.92)
-      ),
-      rgba(255, 248, 235, 0.82);
-    border: 1px solid rgba(133, 98, 49, 0.14);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.5),
-      inset 0 -14px 24px rgba(145, 104, 47, 0.05),
-      0 16px 28px rgba(92, 58, 20, 0.08);
-    isolation: isolate;
-  }
-
-  .selected-album-card::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    background: linear-gradient(
-        180deg,
-        rgba(255, 252, 247, 0.92),
-        rgba(248, 240, 224, 0.84) 42%,
-        rgba(239, 223, 194, 0.92)
-      ),
-      radial-gradient(
-        circle at top right,
-        rgba(255, 255, 255, 0.5),
-        transparent 34%
-      );
-  }
-
-  .selected-album-card.has-cover::before {
-    content: "";
-    position: absolute;
-    inset: -10%;
-    z-index: 0;
-    background-image: var(--selected-album-art);
-    background-size: cover;
-    background-position: center;
-    filter: blur(24px) saturate(0.72) brightness(1.08);
-    transform: scale(1.06);
-    opacity: 0.9;
-  }
-
-  .selected-album-shell,
-  .selected-album-copy,
-  .selected-album-actions,
-  .sidebar-side-panel {
-    position: relative;
-    z-index: 2;
   }
 
   .selected-album-title,
   .drawer-title {
     font-size: calc(15px * var(--app-font-scale));
     font-weight: 700;
-    color: #2f1c04;
+    color: #2c1905;
     letter-spacing: 0.01em;
-  }
-
-  .selected-album-headline {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-    flex-wrap: wrap;
-  }
-
-  .selected-album-shell {
-    display: block;
-    align-items: start;
-  }
-
-  .selected-album-badge {
-    background: rgba(122, 81, 34, 0.12);
-    border: 1px solid rgba(122, 81, 34, 0.18);
-    color: #6a4315;
+    line-height: 1.2;
   }
 
   .selected-album-artist {
@@ -1538,153 +1279,105 @@
   .selected-album-stats {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 8px 10px;
     font-size: calc(9px * var(--app-font-scale));
-    line-height: 1.5;
-    color: rgba(96, 63, 24, 0.8);
+    line-height: 1.6;
+    color: rgba(95, 62, 23, 0.8);
     font-family: "Courier New", monospace;
   }
 
-  .selected-album-stats span {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+  .selected-album-stats span::after {
+    content: "/";
+    margin-left: 10px;
+    color: rgba(109, 75, 34, 0.38);
   }
 
-  .selected-album-stats span::before {
-    content: "•";
-    color: rgba(120, 82, 31, 0.44);
-  }
-
-  .selected-album-stats span:first-child::before {
-    content: "";
+  .selected-album-stats span:last-child::after {
     display: none;
   }
 
+  .selected-album-actions,
+  .drawer-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .selected-album-actions {
+    padding-top: 6px;
+  }
+
   .selected-album-meta {
-    font-size: calc(10px * var(--app-font-scale));
-    line-height: 1.55;
-    color: #6d4c23;
-  }
-
-  .sidebar-side-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding: 14px 14px 12px;
-    border-radius: 22px;
-    background: linear-gradient(
-      180deg,
-      rgba(247, 238, 220, 0.98),
-      rgba(237, 220, 191, 0.94)
-    );
-    border: 1px solid rgba(133, 98, 49, 0.14);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 251, 244, 0.6),
-      inset 0 -18px 24px rgba(158, 114, 57, 0.05),
-      0 12px 22px rgba(98, 63, 22, 0.08);
-  }
-
-  .sidebar-side-head {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .sidebar-side-kicker {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .sidebar-side-badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 4px 8px;
-    border-radius: 999px;
-    background: rgba(136, 95, 45, 0.1);
-    border: 1px solid rgba(136, 95, 45, 0.14);
-    color: #6c481b;
-    font-size: calc(8px * var(--app-font-scale));
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    font-size: calc(9px * var(--app-font-scale));
+    line-height: 1.5;
+    color: #6f4f26;
     font-family: "Courier New", monospace;
+  }
+
+  .side-sheet {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-top: 14px;
+    border-top: 1px solid rgba(108, 76, 36, 0.14);
+  }
+
+  .side-sheet-head {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
   }
 
   .sidebar-side-picker {
     display: flex;
     flex-wrap: wrap;
-    gap: 10px;
-    align-items: baseline;
-    padding-bottom: 2px;
+    gap: 12px;
+    align-items: center;
+    padding: 2px 0 6px;
   }
 
-  .side-chip {
-    border: 1px solid rgba(124, 86, 38, 0.12);
-    border-radius: 999px;
-    padding: 7px 10px 6px;
-    background: rgba(255, 248, 235, 0.72);
-    color: #5a3a12;
+  .side-link {
+    border: 0;
+    padding: 0 0 2px;
+    background: transparent;
+    color: rgba(92, 60, 23, 0.56);
     font-size: calc(9px * var(--app-font-scale));
-    cursor: pointer;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
-    opacity: 0.72;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.44);
     font-family: "Courier New", monospace;
+    cursor: pointer;
+    border-bottom: 1px solid transparent;
+    transition:
+      color 0.14s ease,
+      border-color 0.14s ease;
   }
 
-  .side-chip:hover {
-    opacity: 0.92;
+  .side-link:hover {
+    color: #553712;
   }
 
-  .side-chip.active {
-    color: #2f1c04;
-    opacity: 1;
-    background: linear-gradient(
-      180deg,
-      rgba(154, 111, 56, 0.18),
-      rgba(255, 249, 239, 0.92)
-    );
-    border-color: rgba(124, 86, 38, 0.18);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.54),
-      0 8px 14px rgba(100, 63, 22, 0.08);
+  .side-link.active {
+    color: #2b1702;
+    border-color: rgba(92, 60, 23, 0.72);
   }
 
   .sidebar-track-list {
     display: flex;
     flex-direction: column;
     gap: 0;
-    padding: 10px 12px 4px;
-    border-radius: 16px;
-    background: repeating-linear-gradient(
-        180deg,
-        rgba(147, 108, 55, 0.06) 0,
-        rgba(147, 108, 55, 0.06) 1px,
-        transparent 1px,
-        transparent 34px
-      ),
-      linear-gradient(
-        180deg,
-        rgba(250, 244, 230, 0.98),
-        rgba(245, 234, 211, 0.94)
-      );
-    border: 1px solid rgba(137, 99, 47, 0.12);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 251, 244, 0.82),
-      inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+    border-top: 1px solid rgba(110, 79, 39, 0.2);
+    border-bottom: 1px solid rgba(110, 79, 39, 0.16);
   }
 
   .sidebar-track-list-head {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 8px;
-    padding: 0 0 8px;
+    padding: 7px 0 8px;
     border-bottom: 1px solid rgba(124, 86, 38, 0.18);
     font-size: calc(8px * var(--app-font-scale));
-    letter-spacing: 0.16em;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
     color: rgba(108, 73, 31, 0.78);
     font-family: "Courier New", monospace;
@@ -1695,21 +1388,23 @@
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: 10px;
     align-items: center;
-    padding: 10px 0;
-    border-bottom: 1px dotted rgba(127, 98, 57, 0.2);
+    padding: 9px 0;
+    border-bottom: 1px dotted rgba(127, 98, 57, 0.22);
+    position: relative;
   }
 
   .sidebar-track.playing {
-    padding-inline: 4px;
-    margin-inline: -4px;
     border-bottom-color: rgba(94, 63, 24, 0.34);
-    background: linear-gradient(
-      90deg,
-      rgba(156, 114, 58, 0.12),
-      rgba(255, 248, 238, 0.28),
-      rgba(156, 114, 58, 0.06)
-    );
-    border-radius: 8px;
+  }
+
+  .sidebar-track.playing::before {
+    content: "";
+    position: absolute;
+    left: -10px;
+    top: 7px;
+    bottom: 7px;
+    width: 2px;
+    background: rgba(95, 61, 20, 0.72);
   }
 
   .sidebar-track-num,
@@ -1734,60 +1429,173 @@
     font-weight: 700;
   }
 
+  .album-list,
+  .side-editor-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-width: 0;
+  }
+
+  .catalog-head {
+    align-items: baseline;
+  }
+
+  .catalog-count {
+    font-size: calc(9px * var(--app-font-scale));
+    letter-spacing: 0.12em;
+    color: rgba(96, 63, 24, 0.76);
+    text-transform: uppercase;
+    font-family: "Courier New", monospace;
+  }
+
+  .album-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+    padding: 10px 0 11px 12px;
+    border: 0;
+    border-top: 1px solid rgba(108, 76, 36, 0.16);
+    background: transparent;
+    color: #4c3210;
+    text-align: left;
+    cursor: pointer;
+    transition: color 0.14s ease;
+    position: relative;
+  }
+
+  .album-card:first-child {
+    border-top: 1px solid rgba(108, 76, 36, 0.2);
+  }
+
+  .album-card:hover {
+    color: #2b1905;
+  }
+
+  .album-card.active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 9px;
+    bottom: 9px;
+    width: 2px;
+    background: rgba(96, 63, 24, 0.76);
+  }
+
+  .album-card-index {
+    padding-top: 1px;
+    font-size: calc(9px * var(--app-font-scale));
+    letter-spacing: 0.18em;
+    color: rgba(108, 73, 31, 0.72);
+    font-family: "Courier New", monospace;
+  }
+
+  .album-card-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .album-card-title {
+    font-size: calc(11px * var(--app-font-scale));
+    font-weight: 700;
+    line-height: 1.25;
+  }
+
+  .album-card.active .album-card-title {
+    color: #2a1703;
+  }
+
+  .album-card-meta {
+    font-size: calc(9px * var(--app-font-scale));
+    line-height: 1.5;
+    color: rgba(87, 57, 20, 0.76);
+  }
+
   .side-helper {
-    padding: 14px 16px;
-    border-radius: 16px;
-    background: rgba(252, 244, 230, 0.68);
-    border: 1px dashed rgba(136, 95, 45, 0.18);
+    padding: 6px 0 0;
+    border-top: 1px solid rgba(108, 76, 36, 0.14);
   }
 
   .title-editor {
     display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px 14px;
+    align-items: start;
+    padding: 6px 0 14px;
+    border-bottom: 1px solid rgba(108, 76, 36, 0.16);
+  }
+
+  .title-editor-label {
+    padding-top: 10px;
+    font-size: calc(9px * var(--app-font-scale));
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: #846337;
+    font-family: "Courier New", monospace;
+  }
+
+  .title-editor-field {
+    display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
+    gap: 10px;
   }
 
   .title-input {
     width: 100%;
-    border: 1px solid rgba(127, 98, 57, 0.18);
-    border-radius: 10px;
-    padding: 12px;
-    background: rgba(255, 251, 244, 0.86);
+    border: 0;
+    border-bottom: 1px solid rgba(127, 98, 57, 0.26);
+    padding: 8px 0 7px;
+    background: transparent;
     color: #432a08;
     font: inherit;
   }
 
+  .title-input:focus {
+    outline: none;
+    border-bottom-color: rgba(93, 63, 26, 0.6);
+  }
+
   .save-btn {
-    padding: 0 14px;
-    background: #3d6b53;
-    color: #eef8f0;
-    font-size: calc(12px * var(--app-font-scale));
+    border: 0;
+    padding: 8px 0 7px;
+    background: transparent;
+    color: #3c5e49;
+    font-size: calc(9px * var(--app-font-scale));
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
     font-family: "Courier New", monospace;
+    cursor: pointer;
   }
 
   .danger-btn,
   .danger-icon {
-    background: rgba(164, 58, 43, 0.12);
-    color: #9d3426;
-  }
-
-  .danger-btn {
-    padding: 7px 10px;
-    font-size: calc(11px * var(--app-font-scale));
+    color: #933122;
   }
 
   .close-btn {
     align-self: flex-start;
   }
 
+  .drawer-title-block {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .drawer-actions {
+    padding-bottom: 14px;
+    border-bottom: 1px solid rgba(108, 76, 36, 0.16);
+  }
+
   .side-editor {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    padding: 12px;
-    border-radius: 14px;
-    background: rgba(255, 250, 242, 0.78);
-    border: 1px solid rgba(133, 98, 49, 0.14);
+    padding: 14px 0 0;
+    border-top: 1px solid rgba(108, 76, 36, 0.16);
   }
 
   .side-editor-head {
@@ -1812,18 +1620,17 @@
   .editor-track-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 0;
     min-width: 0;
   }
 
   .editor-track {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
+    gap: 10px;
     align-items: center;
-    padding: 10px;
-    border-radius: 10px;
-    background: rgba(233, 221, 199, 0.46);
+    padding: 8px 0;
+    border-bottom: 1px dotted rgba(127, 98, 57, 0.18);
   }
 
   .editor-track-body {
@@ -1843,16 +1650,28 @@
 
   .editor-track-tools {
     display: flex;
-    gap: 4px;
+    gap: 8px;
+    align-items: center;
   }
 
-  .editor-track-tools button {
-    width: 28px;
-    height: 28px;
-    background: rgba(255, 251, 246, 0.9);
+  .editor-track-tool {
+    border: 0;
+    padding: 0;
+    background: transparent;
     color: #613c12;
-    font-size: calc(12px * var(--app-font-scale));
+    font-size: calc(11px * var(--app-font-scale));
     font-family: "Courier New", monospace;
+    cursor: pointer;
+    transition: color 0.14s ease;
+  }
+
+  .editor-track-tool:hover {
+    color: #2b1702;
+  }
+
+  .editor-track-tool:disabled {
+    opacity: 0.34;
+    cursor: default;
   }
 
   .turntable-panel {
@@ -1877,7 +1696,7 @@
 
   @media (max-width: 1180px) {
     .studio {
-      grid-template-columns: minmax(302px, 344px) minmax(0, 1fr);
+      grid-template-columns: minmax(272px, 300px) minmax(0, 1fr);
     }
 
     .turntable-panel {
@@ -1899,6 +1718,10 @@
       padding-top: 0px;
     }
 
+    main.desktop-overlay-shell .editor-drawer {
+      padding-top: 20px;
+    }
+
     .titlebar-drag-region {
       height: 44px;
     }
@@ -1913,6 +1736,7 @@
       border-bottom: 1px solid rgba(112, 76, 31, 0.18);
       min-height: 320px;
     }
+
     .library-panel.collapsed {
       min-height: auto;
       border-bottom: none;
@@ -1933,6 +1757,11 @@
 
     .title-editor {
       grid-template-columns: 1fr;
+      gap: 8px;
+    }
+
+    .title-editor-field {
+      grid-template-columns: 1fr;
     }
 
     .arranger-head {
@@ -1947,6 +1776,10 @@
     .panel-head {
       flex-direction: column;
       align-items: stretch;
+    }
+
+    .selected-album-sheet {
+      grid-template-columns: 1fr;
     }
   }
 </style>

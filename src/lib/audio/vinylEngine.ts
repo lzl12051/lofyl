@@ -48,11 +48,14 @@ export class VinylEngine {
 
   // 状态回调
   public onTimeUpdate: ((time: number) => void) | null = null;
+  public onSpectrumUpdate: ((levels: number[]) => void) | null = null;
   public onSideEnded: (() => void) | null = null;
   public onTrackChange: ((trackIndex: number) => void) | null = null;
 
   private rafId: number | null = null;
+  private spectrumIntervalId: number | null = null;
   private visualBandLevels: number[] = [];
+  private spectrumBandCount: number = 12;
 
   constructor() {
     this.ctx = new AudioContext();
@@ -197,6 +200,8 @@ export class VinylEngine {
       this.rafId = null;
     }
 
+    this.stopSpectrumTracking();
+
     if (!options.keepNoise) {
       // 底噪渐出
       this.vinylNoiseGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.3);
@@ -280,6 +285,7 @@ export class VinylEngine {
 
   destroy(): void {
     this.stop();
+    this.stopSpectrumTracking();
     if (this.vinylNoiseSource) {
       try { this.vinylNoiseSource.stop(); } catch { /* 已停止 */ }
     }
@@ -446,16 +452,45 @@ export class VinylEngine {
     source.start();
   }
 
-  /** 使用 rAF 持续更新时间并触发回调 */
+  /** 使用 rAF 持续更新时间并触发回调（节流至 ~15 FPS） */
   private startTimeTracking(): void {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+    let lastUpdateTime = 0;
+    const TIME_INTERVAL = 66; // ~15 FPS
 
-    const tick = () => {
+    const tick = (now: number) => {
       if (!this.isPlaying) return;
-      this.onTimeUpdate?.(this.getCurrentTime());
+      if (now - lastUpdateTime >= TIME_INTERVAL) {
+        this.onTimeUpdate?.(this.getCurrentTime());
+        lastUpdateTime = now;
+      }
       this.rafId = requestAnimationFrame(tick);
     };
     this.rafId = requestAnimationFrame(tick);
+
+    this.startSpectrumTracking();
+  }
+
+  /** 独立的频谱更新定时器（~20 FPS） */
+  private startSpectrumTracking(): void {
+    this.stopSpectrumTracking();
+    this.spectrumIntervalId = window.setInterval(() => {
+      if (!this.isPlaying) return;
+      const levels = this.getVisualLevels(this.spectrumBandCount);
+      this.onSpectrumUpdate?.(levels);
+    }, 16); // ~60 FPS
+  }
+
+  private stopSpectrumTracking(): void {
+    if (this.spectrumIntervalId !== null) {
+      clearInterval(this.spectrumIntervalId);
+      this.spectrumIntervalId = null;
+    }
+  }
+
+  /** 设置频谱分析的频段数 */
+  setSpectrumBandCount(count: number): void {
+    this.spectrumBandCount = count;
   }
 }
 
