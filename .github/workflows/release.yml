@@ -4,9 +4,14 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -17,11 +22,11 @@ jobs:
       matrix:
         include:
           - name: macOS Apple Silicon
-            platform: macos-latest
+            platform: macos-14
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
           - name: macOS Intel
-            platform: macos-latest
+            platform: macos-13
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
           - name: Windows x64
@@ -38,6 +43,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

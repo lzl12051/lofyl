@@ -113,10 +113,12 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-推送后会自动执行：
+也可以在 GitHub Actions 页面手动执行 `release` workflow。
 
-- macOS Apple Silicon 安装包构建
-- macOS Intel 安装包构建
+推送 tag 或手动触发后会自动执行：
+
+- macOS Apple Silicon 安装包构建（`macos-14`）
+- macOS Intel 安装包构建（`macos-13`）
 - Windows x64 NSIS 安装包构建
 - 生成对应的 GitHub Release 并上传产物
 

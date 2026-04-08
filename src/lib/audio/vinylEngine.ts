@@ -15,7 +15,7 @@ export class VinylEngine {
   private musicSource: AudioBufferSourceNode | null = null;
   private musicGain: GainNode;
   private analyser: AnalyserNode;
-  private analyserData: Float32Array;
+  private analyserData: Float32Array<ArrayBuffer>;
   private musicBuffer: AudioBuffer | null = null;
 
   // Wow & flutter LFO
@@ -65,7 +65,9 @@ export class VinylEngine {
     this.analyser.minDecibels = -96;
     this.analyser.maxDecibels = -18;
     this.analyser.smoothingTimeConstant = 0.68;
-    this.analyserData = new Float32Array(this.analyser.frequencyBinCount);
+    this.analyserData = new Float32Array(
+      new ArrayBuffer(this.analyser.frequencyBinCount * Float32Array.BYTES_PER_ELEMENT),
+    );
     this.musicGain.connect(this.analyser);
     this.analyser.connect(this.ctx.destination);
 

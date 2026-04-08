@@ -509,6 +509,7 @@
 
 <main class:desktop-overlay-shell={isDesktopApp}>
   {#if isDesktopApp}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="titlebar-drag-region" on:mousedown={onTitlebarMousedown}></div>
   {/if}
   <div class="studio" class:collapsed-layout={!libraryPanelVisible}>
