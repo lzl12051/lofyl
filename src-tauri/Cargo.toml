@@ -1,6 +1,6 @@
 [package]
 name = "lofi-vinyl"
-version = "0.1.3"
+version = "0.1.4"
 description = "Desktop shell for the lofi vinyl music library"
 authors = ["zhilong"]
 license = ""
