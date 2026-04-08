@@ -14,11 +14,11 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            args: --target aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles dmg
           - platform: macos-latest
-            args: --target x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles dmg
           - platform: windows-latest
-            args: ""
+            args: --bundles nsis
 
     runs-on: ${{ matrix.platform }}
 
@@ -41,7 +41,7 @@ jobs:
         run: npm ci
 
       - name: Build and publish Tauri app
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@action-v0.6.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
