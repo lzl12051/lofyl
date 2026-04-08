@@ -66,7 +66,7 @@ Lofi Vinyl 是一个 **桌面优先** 的本地音乐库 + 黑胶唱机模拟器
 | 文件 | 职责 | 关键依赖 |
 |------|------|----------|
 | `App.svelte` | **应用状态中心与交互编排层**：曲库加载、专辑选择、导入、保存、删除、编辑、切面、播放启动序列 | Turntable, vinylEngine, model, persistence, importAudio, Tauri window |
-| `lib/turntable/Turntable.svelte` | Canvas 2D 唱机渲染：唱盘启停、唱臂动画、落针拖拽、封面显示模式切换、点击/拖拽寻位 | needleMapper |
+| `lib/turntable/Turntable.svelte` | Canvas 2D 唱机渲染：唱盘启停、唱臂动画、落针拖拽、封面显示模式切换、点击/拖拽寻位；内部维护离屏缓存层以降低每帧重绘成本 | needleMapper |
 | `lib/turntable/needleMapper.ts` | 盘面几何与时间换算：点击位置 ↔ 面内时间、播放时间 ↔ 唱针半径 | — |
 | `lib/audio/vinylEngine.ts` | Web Audio 播放引擎：曲目 buffer 缓存、指定时间起播、自动续播、wow/flutter、底噪、爆裂声 | albumSplitter (`resolveTrackAtTime`) |
 | `lib/audio/albumSplitter.ts` | 曲目自动分面、从二维 side 数据构建播放态 Album、根据面内时间定位曲目 | types |
@@ -267,7 +267,18 @@ AudioContext
 
 - `Turntable.svelte` 可以持有**渲染和交互级的局部状态**
   - 例如动画插值、指针拖拽、画布尺寸、封面图片缓存
+  - 以及离屏渲染层（机身层、转台层、唱片基底层、唱片高光层）与其 dirty 标记
 - 但**应用级状态和持久化行为仍由 `App.svelte` 编排**
+
+### Turntable 渲染事实
+
+- `Turntable.svelte` 当前不是“每帧从零画整台机器”，而是 **静态层缓存 + 动态层合成**
+  - 机身木质底座、转台本体、唱片基底、唱片高光分别缓存到离屏 canvas
+  - 只有尺寸变化、side/封面/显示模式变化时才重建对应 layer
+- 主画布 DPR 当前有上限，避免高 DPI 下 2D Canvas 成本失控
+- 金属转台本体与其固定灯位高光 **不做 wobble**
+- wobble 主要保留在唱片与唱臂，营造轻微机械感
+- 盘面高光当前沿刻槽方向生成，目标是“嵌在盘面纹理里”，不是单独贴一层玻璃高光
 
 ### 组件通信方式
 
@@ -309,6 +320,7 @@ AudioContext
 | Canvas 唱机而不是 DOM | 需要稳定控制唱盘旋转、唱臂几何、纹理与拖针体验 |
 | 使用 `convertFileSrc()` + asset protocol | 前端可直接 `fetch()` 本地音频做解码，无需自建文件流桥接 |
 | macOS 上用 `mdls` 读元数据 | 在当前范围内足够轻量，避免引入更重的元数据解析方案 |
+| Turntable 使用离屏 layer 缓存 | 当前视觉复杂度较高，若每帧重绘整机在高 DPI 设备上会导致极高 GPU 占用 |
 
 ### 避免
 
@@ -318,6 +330,10 @@ AudioContext
   - `App.svelte` 里的启转 / cue / drop 时长需要和 `Turntable.svelte` 动画语义保持一致
   - `needleMapper.ts` 与唱机几何假设也应一并核对
 - 不要把桌面导入逻辑直接绑死到浏览器 API；当前代码要求桌面与纯前端 dev 模式都能安全运行
+- 不要把金属转台本体、固定灯位高光或容器阴影误并入旋转层
+  - 这些元素应保持静态，否则会出现“高光跟着盘体转”的明显穿帮
+- 不要轻易移除 Turntable 的离屏缓存层
+  - 若必须调整渲染结构，先确认哪些元素是静态层、哪些元素只应在 side/尺寸变化时重建
 
 ---
 
@@ -373,6 +389,7 @@ src-tauri/src/lib.rs
 |------|----------|--------|
 | 2026-04-08 | 创建本文档，记录初始架构 | AI Agent |
 | 2026-04-08 | 按当前实现修正文档：补充真实模型转换链路、状态字段、播放启动/手动落针流程、asset protocol 与实际模块职责 | AI Agent |
+| 2026-04-08 | 补充 Turntable 当前渲染事实：离屏 layer 缓存、DPR 限幅、金属转台静态高光/无 wobble、唱片与唱臂 wobble、盘面沿刻槽高光 | AI Agent |
 
 ---
 
@@ -390,4 +407,3 @@ src-tauri/src/lib.rs
 3. **保持文档是“架构文档”，不是源码拷贝。**
    记录边界、约束、流程和依赖，不要机械抄实现细节。
 4. **文档与代码冲突时，以代码为准，并尽快修正文档。**
-

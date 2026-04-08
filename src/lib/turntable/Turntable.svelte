@@ -37,6 +37,16 @@
   let dragArmAngle: number | null = null;
   let isManualCarryDrag = false;
   let canvasDisplaySize = 0;
+  let renderDpr = 1;
+  let coverImageVersion = 0;
+  let machineLayer: HTMLCanvasElement | null = null;
+  let platterLayer: HTMLCanvasElement | null = null;
+  let discBaseLayer: HTMLCanvasElement | null = null;
+  let discLightingLayer: HTMLCanvasElement | null = null;
+  let machineLayerDirty = true;
+  let platterLayerDirty = true;
+  let discBaseLayerDirty = true;
+  let discLightingLayerDirty = true;
 
   // CSS 逻辑像素尺寸（用于所有绘图计算）
   let drawW = 0;
@@ -81,6 +91,7 @@
   const PIVOT_X_CANVAS_NORM = 0.93;
   const PIVOT_Y_CANVAS_NORM = 0.115;
   const NEEDLE_DRAG_HIT_RADIUS = 18;
+  const MAX_RENDER_DPR = 1.5;
 
   // 唱臂枢轴（归一化，相对于碟心和碟片半径）
   // 目标造型：
@@ -256,7 +267,7 @@
     if (!canvas || !ctx) return;
     syncLayoutBox();
 
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_RENDER_DPR);
     const nextDrawW = canvasDisplaySize || canvas.clientWidth;
     const nextDrawH = canvasDisplaySize || canvas.clientHeight || nextDrawW;
 
@@ -267,9 +278,14 @@
 
     drawW = nextDrawW;
     drawH = nextDrawH;
+    renderDpr = dpr;
     canvas.width = Math.round(drawW * dpr);
     canvas.height = Math.round(drawH * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    machineLayerDirty = true;
+    platterLayerDirty = true;
+    discBaseLayerDirty = true;
+    discLightingLayerDirty = true;
   }
 
   function scheduleCanvasSync() {
@@ -283,10 +299,80 @@
     });
   }
 
+  function createRenderLayer(): HTMLCanvasElement | null {
+    if (!drawW || !drawH) return null;
+    const layer = document.createElement('canvas');
+    layer.width = Math.round(drawW * renderDpr);
+    layer.height = Math.round(drawH * renderDpr);
+    const layerCtx = layer.getContext('2d');
+    if (!layerCtx) return null;
+    layerCtx.setTransform(renderDpr, 0, 0, renderDpr, 0, 0);
+    const previousCtx = ctx;
+    ctx = layerCtx;
+    ctx.clearRect(0, 0, drawW, drawH);
+    return layer;
+  }
+
+  function finalizeRenderLayer(layer: HTMLCanvasElement | null, previousCtx: CanvasRenderingContext2D) {
+    ctx = previousCtx;
+    return layer;
+  }
+
+  function rebuildMachineLayer() {
+    if (!ctx) return;
+    const previousCtx = ctx;
+    const layer = createRenderLayer();
+    if (!layer) return;
+    drawMachineSurface(drawW, drawH);
+    machineLayer = finalizeRenderLayer(layer, previousCtx);
+    machineLayerDirty = false;
+  }
+
+  function rebuildPlatterLayer() {
+    if (!ctx) return;
+    const previousCtx = ctx;
+    const layer = createRenderLayer();
+    if (!layer) return;
+    drawPlatter(drawW, drawH, { applyTransform: false, includeShadow: false });
+    platterLayer = finalizeRenderLayer(layer, previousCtx);
+    platterLayerDirty = false;
+  }
+
+  function rebuildDiscLayers() {
+    if (!ctx) return;
+
+    {
+      const previousCtx = ctx;
+      const layer = createRenderLayer();
+      if (!layer) return;
+      drawDisc(drawW, drawH, { applyRotation: false, includeLighting: false });
+      if (side) drawTrackMarkers(drawW, drawH);
+      discBaseLayer = finalizeRenderLayer(layer, previousCtx);
+      discBaseLayerDirty = false;
+    }
+
+    {
+      const previousCtx = ctx;
+      const layer = createRenderLayer();
+      if (!layer) return;
+      drawDiscLightingLayer(drawW, drawH);
+      discLightingLayer = finalizeRenderLayer(layer, previousCtx);
+      discLightingLayerDirty = false;
+    }
+  }
+
+  function ensureRenderLayers() {
+    if (machineLayerDirty || !machineLayer) rebuildMachineLayer();
+    if (platterLayerDirty || !platterLayer) rebuildPlatterLayer();
+    if (discBaseLayerDirty || !discBaseLayer || discLightingLayerDirty || !discLightingLayer) {
+      rebuildDiscLayers();
+    }
+  }
+
   function getMechanicalWobble(radius: number) {
     const t = wobbleTime;
-    const strength = 0.35 + platterSpeed * 0.65;
-    const armWobbleStrength = strength * 0.22;
+    const strength = 0.58 + platterSpeed * 0.9;
+    const armWobbleStrength = strength * 0.38;
 
     return {
       platterOffsetX:
@@ -413,12 +499,48 @@
 
     const W = drawW;
     const H = drawH;
+    const turntable = getTurntableGeometry(W, H);
+
+    ensureRenderLayers();
 
     ctx.clearRect(0, 0, W, H);
-    drawMachineSurface(W, H);
-    drawPlatter(W, H);
-    drawDisc(W, H);
-    if (side) drawTrackMarkers(W, H);
+    if (machineLayer) {
+      ctx.drawImage(machineLayer, 0, 0, W, H);
+    } else {
+      drawMachineSurface(W, H);
+    }
+
+    drawPlatterShadow(W, H);
+
+    if (platterLayer) {
+      ctx.save();
+      ctx.translate(turntable.cx, turntable.cy);
+      ctx.rotate(platAngle);
+      ctx.drawImage(platterLayer, -turntable.cx, -turntable.cy, W, H);
+      ctx.restore();
+    } else {
+      drawPlatter(W, H);
+    }
+
+    drawPlatterStaticHighlights(W, H);
+
+    if (discBaseLayer) {
+      ctx.save();
+      ctx.translate(turntable.cx, turntable.cy);
+      ctx.rotate(platAngle);
+      ctx.drawImage(discBaseLayer, -turntable.cx, -turntable.cy, W, H);
+      ctx.restore();
+    } else {
+      drawDisc(W, H, { includeLighting: false });
+      if (side) drawTrackMarkers(W, H);
+    }
+
+    if (discLightingLayer) {
+      ctx.drawImage(discLightingLayer, 0, 0, W, H);
+    } else {
+      drawDiscLightingLayer(W, H);
+    }
+
     drawTonearm(W, H);
 
     animationId = requestAnimationFrame(draw);
@@ -724,16 +846,12 @@
     }
   }
 
-  function drawPlatter(W: number, H: number) {
+  function drawPlatterShadow(W: number, H: number) {
     const { cx, cy, platterRadius: r } = getTurntableGeometry(W, H);
-    const wobble = getMechanicalWobble(r);
 
     ctx.save();
-    ctx.translate(cx + wobble.platterOffsetX, cy + wobble.platterOffsetY);
-    ctx.rotate(wobble.platterRotation);
-    ctx.scale(wobble.platterScaleX, wobble.platterScaleY);
+    ctx.translate(cx, cy);
 
-    // ── 转盘投影 ─────────────────────────────────────────────────
     const dropSh = ctx.createRadialGradient(r * 0.06, r * 0.09, r * 0.72, r * 0.06, r * 0.09, r * 1.22);
     dropSh.addColorStop(0,   'rgba(0,0,0,0)');
     dropSh.addColorStop(0.42,'rgba(0,0,0,0.12)');
@@ -743,6 +861,49 @@
     ctx.arc(0, 0, r * 1.22, 0, Math.PI * 2);
     ctx.fillStyle = dropSh;
     ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawPlatterStaticHighlights(W: number, H: number) {
+    const { cx, cy, platterRadius: r } = getTurntableGeometry(W, H);
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // 固定灯位下的金属掠射高光，不应跟随转盘旋转。
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 1.01, -Math.PI * 0.88, -Math.PI * 0.28);
+    ctx.strokeStyle = 'rgba(240, 230, 210, 0.28)';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawPlatter(
+    W: number,
+    H: number,
+    options: { applyTransform?: boolean; includeShadow?: boolean } = {},
+  ) {
+    const { cx, cy, platterRadius: r } = getTurntableGeometry(W, H);
+    const applyTransform = options.applyTransform ?? true;
+    const includeShadow = options.includeShadow ?? true;
+    const wobble = getMechanicalWobble(r);
+
+    if (includeShadow) {
+    drawPlatterShadow(W, H);
+    drawPlatterStaticHighlights(W, H);
+    }
+
+    ctx.save();
+    if (applyTransform) {
+      ctx.translate(cx + wobble.platterOffsetX, cy + wobble.platterOffsetY);
+      ctx.rotate(wobble.platterRotation);
+      ctx.scale(wobble.platterScaleX, wobble.platterScaleY);
+    } else {
+      ctx.translate(cx, cy);
+    }
 
     // ── 金属转盘本体 ─────────────────────────────────────────────
     const metalG = ctx.createRadialGradient(-r * 0.14, -r * 0.14, r * 0.06, 0, 0, r * 1.04);
@@ -765,13 +926,6 @@
       ctx.lineWidth   = 0.9;
       ctx.stroke();
     }
-
-    // 顶左高光弧（金属光泽）
-    ctx.beginPath();
-    ctx.arc(0, 0, r * 1.01, -Math.PI * 0.88, -Math.PI * 0.28);
-    ctx.strokeStyle = 'rgba(240, 230, 210, 0.28)';
-    ctx.lineWidth   = 2.5;
-    ctx.stroke();
 
     // ── 橡胶防滑垫 ──────────────────────────────────────────────
     const matR  = r * 0.974;
@@ -815,13 +969,21 @@
     ctx.restore();
   }
 
-  function drawDisc(W: number, H: number) {
+  function drawDisc(
+    W: number,
+    H: number,
+    options: { applyRotation?: boolean; includeLighting?: boolean } = {},
+  ) {
     const { cx, cy, discRadius: r } = getTurntableGeometry(W, H);
     const playableInnerRadius = side ? getPlayableInnerRadius(side.totalDuration) : GROOVE_INNER_RADIUS;
+    const applyRotation = options.applyRotation ?? true;
+    const includeLighting = options.includeLighting ?? true;
 
     ctx.save();
     ctx.translate(cx, cy);
-    ctx.rotate(platAngle);
+    if (applyRotation) {
+      ctx.rotate(platAngle);
+    }
 
     drawDiscBody(r);
 
@@ -886,6 +1048,13 @@
     drawLabel(r);
     ctx.restore();
 
+    if (includeLighting) {
+      drawDiscLighting(cx, cy, r);
+    }
+  }
+
+  function drawDiscLightingLayer(W: number, H: number) {
+    const { cx, cy, discRadius: r } = getTurntableGeometry(W, H);
     drawDiscLighting(cx, cy, r);
   }
 
@@ -1484,13 +1653,26 @@
     }
   }
 
+  function loadCoverImage(src: string | undefined) {
+    if (!src) {
+      coverImage = null;
+      coverImageVersion += 1;
+      discBaseLayerDirty = true;
+      return;
+    }
+
+    const image = new Image();
+    image.onload = () => {
+      coverImage = image;
+      coverImageVersion += 1;
+      discBaseLayerDirty = true;
+      scheduleCanvasSync();
+    };
+    image.src = src;
+  }
+
   onMount(() => {
     ctx = canvas.getContext('2d')!;
-
-    if (coverUrl) {
-      coverImage = new Image();
-      coverImage.src = coverUrl;
-    }
 
     syncCanvasSize();
     scheduleCanvasSync();
@@ -1502,13 +1684,30 @@
     animationId = requestAnimationFrame(draw);
   });
 
-  $: if (coverUrl && canvas) {
-    coverImage = new Image();
-    coverImage.src = coverUrl;
+  let discLayerCacheKey = '';
+  $: {
+    const nextDiscLayerKey = [
+      side?.label ?? 'none',
+      side?.totalDuration ?? 0,
+      side?.tracks.map((track) => `${track.id}:${track.duration}`).join('|') ?? '',
+      artworkMode,
+      coverUrl ?? '',
+      coverImageVersion,
+    ].join('::');
+
+    if (nextDiscLayerKey !== discLayerCacheKey) {
+      discLayerCacheKey = nextDiscLayerKey;
+      discBaseLayerDirty = true;
+      discLightingLayerDirty = true;
+    }
   }
 
   $: if (canvas) {
     scheduleCanvasSync();
+  }
+
+  $: if (canvas) {
+    loadCoverImage(coverUrl);
   }
 
   onDestroy(() => {
@@ -1598,9 +1797,6 @@
     height: 100%;
     cursor: default;
     border-radius: 0.02em;
-    box-shadow:
-      0 12px 40px rgba(0, 0, 0, 0.42),
-      0 4px 12px rgba(0, 0, 0, 0.24);
   }
 
   .turntable-canvas.needle-hover {
