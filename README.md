@@ -96,6 +96,35 @@ npm run desktop:build
 npm run check
 ```
 
+## 发布 GitHub Release
+
+仓库内已经提供 GitHub Actions 工作流 [`release.yml`](./.github/workflows/release.yml)。
+
+触发方式：
+
+1. 先同步版本号
+   - `package.json`
+   - `src-tauri/tauri.conf.json`
+   - `src-tauri/Cargo.toml`
+2. 提交代码并推送 tag，例如：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+推送后会自动执行：
+
+- macOS Apple Silicon 安装包构建
+- macOS Intel 安装包构建
+- Windows x64 NSIS 安装包构建
+- 生成对应的 GitHub Release 并上传产物
+
+说明：
+
+- 当前 workflow 不包含 macOS / Windows 代码签名，产物可发布，但首次安装时仍可能看到系统安全提示
+- 如果后续要接入自动更新签名或平台证书签名，再补对应的 GitHub Secrets 即可
+
 ## 项目结构
 
 ```text
