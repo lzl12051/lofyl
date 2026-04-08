@@ -1,5 +1,5 @@
 import { convertFileSrc, isTauri } from '@tauri-apps/api/core';
-import { buildAlbumFromSides, MAX_SIDE_DURATION, splitTracksIntoSides } from '../audio/albumSplitter';
+import { buildAlbum, buildAlbumFromSides, expandLongTrack, MAX_SIDE_DURATION, splitTracksIntoSides } from '../audio/albumSplitter';
 import type { PreparedImport } from '../audio/importAudio';
 import type { Album, LibraryAlbum, Track } from '../types';
 
@@ -180,13 +180,13 @@ export function renameLibraryAlbum(album: LibraryAlbum, title: string): LibraryA
 }
 
 export function libraryAlbumToPlaybackAlbum(album: LibraryAlbum): Album {
-  return buildAlbumFromSides(
-    album.id,
-    album.title,
-    album.artist,
-    album.sides.map((side) => side.map(hydrateTrack)),
-    album.coverUrl
-  );
+  // 将 LibraryAlbum 各面展平后，对超长曲目进行虚拟分段展开，再重新分配碟面。
+  // 展开只在播放转换时发生，不影响持久化模型，避免 DB 中 source_path 重复。
+  const playbackTracks = album.sides
+    .flat()
+    .flatMap((track) => expandLongTrack(hydrateTrack(track), MAX_SIDE_DURATION));
+
+  return buildAlbum(album.id, album.title, album.artist, playbackTracks, album.coverUrl);
 }
 
 export function hydrateLibraryAlbum(album: LibraryAlbum): LibraryAlbum {

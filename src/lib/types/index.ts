@@ -8,6 +8,10 @@ export interface Track {
   sourcePath?: string;
   sourceDisplayPath?: string;
   url?: string; // object URL
+  // 虚拟分段字段：指向源文件中的时间范围（秒）。
+  // 仅当单个音频文件被自动切分为多个碟面时设置。
+  startOffset?: number;
+  endOffset?: number;
 }
 
 // 一张碟面（Side A / B / C / D...）

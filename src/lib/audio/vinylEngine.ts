@@ -14,6 +14,8 @@ export class VinylEngine {
   // 主音频
   private musicSource: AudioBufferSourceNode | null = null;
   private musicGain: GainNode;
+  private analyser: AnalyserNode;
+  private analyserData: Float32Array;
   private musicBuffer: AudioBuffer | null = null;
 
   // Wow & flutter LFO
@@ -33,8 +35,13 @@ export class VinylEngine {
   private activeTrackIndex = -1;
   private activeTrackOffset = 0;       // 当前曲目内的偏移（秒）
 
-  // 曲目 buffer 缓存
+  // 曲目 buffer 缓存（keyed by track.id，存切片后的 buffer）
   private trackBuffers: Map<string, AudioBuffer> = new Map();
+
+  // 源文件 buffer 缓存（keyed by track.url，存解码后的完整 buffer）
+  // 用于虚拟分段：同一个文件只解码一次，按 offset 切片给各分段。
+  // loadSide 完成后清空以释放内存。
+  private sourceBuffers: Map<string, AudioBuffer> = new Map();
 
   // 爆音定时器
   private crackleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -45,6 +52,7 @@ export class VinylEngine {
   public onTrackChange: ((trackIndex: number) => void) | null = null;
 
   private rafId: number | null = null;
+  private visualBandLevels: number[] = [];
 
   constructor() {
     this.ctx = new AudioContext();
@@ -52,7 +60,14 @@ export class VinylEngine {
     // 主音乐增益
     this.musicGain = this.ctx.createGain();
     this.musicGain.gain.value = 1.0;
-    this.musicGain.connect(this.ctx.destination);
+    this.analyser = this.ctx.createAnalyser();
+    this.analyser.fftSize = 1024;
+    this.analyser.minDecibels = -96;
+    this.analyser.maxDecibels = -18;
+    this.analyser.smoothingTimeConstant = 0.68;
+    this.analyserData = new Float32Array(this.analyser.frequencyBinCount);
+    this.musicGain.connect(this.analyser);
+    this.analyser.connect(this.ctx.destination);
 
     // Wow & flutter 深度节点（连接到 musicSource.playbackRate，初始化后再连）
     this.wowDepth = this.ctx.createGain();
@@ -72,9 +87,9 @@ export class VinylEngine {
   async loadSide(side: DiscSide): Promise<void> {
     this.currentSide = side;
     // 并发加载所有曲目
-    await Promise.all(
-      side.tracks.map((track) => this.loadTrackBuffer(track))
-    );
+    await Promise.all(side.tracks.map((track) => this.loadTrackBuffer(track)));
+    // 切片完成后清空源文件缓存，释放大块内存（切片结果保留在 trackBuffers）
+    this.sourceBuffers.clear();
   }
 
   /** 从面内指定时间开始播放 */
@@ -157,6 +172,7 @@ export class VinylEngine {
   /** 停止并重置 */
   stop(options: { keepNoise?: boolean } = {}): void {
     this.isPlaying = false;
+    this.visualBandLevels = this.visualBandLevels.map(() => 0);
 
     if (this.musicSource) {
       this.musicSource.onended = null;
@@ -195,6 +211,71 @@ export class VinylEngine {
     return this.isPlaying;
   }
 
+  getVisualLevels(count: number = 12): number[] {
+    if (count <= 0) return [];
+
+    if (!this.isPlaying || !this.musicSource) {
+      this.visualBandLevels = new Array(count).fill(0);
+      return [...this.visualBandLevels];
+    }
+
+    if (this.visualBandLevels.length !== count) {
+      this.visualBandLevels = new Array(count).fill(0);
+    }
+
+    this.analyser.getFloatFrequencyData(this.analyserData);
+    const nyquist = this.ctx.sampleRate / 2;
+    const minFreq = 42;
+    const maxFreq = Math.min(14_000, nyquist * 0.96);
+    const dbSpan = this.analyser.maxDecibels - this.analyser.minDecibels;
+
+    for (let bandIndex = 0; bandIndex < count; bandIndex += 1) {
+      const startFreq = minFreq * Math.pow(maxFreq / minFreq, bandIndex / count);
+      const endFreq = minFreq * Math.pow(maxFreq / minFreq, (bandIndex + 1) / count);
+      const start = Math.max(
+        0,
+        Math.min(
+          this.analyserData.length - 1,
+          Math.floor((startFreq / nyquist) * this.analyserData.length),
+        ),
+      );
+      const end = Math.max(
+        start + 1,
+        Math.min(
+          this.analyserData.length,
+          Math.ceil((endFreq / nyquist) * this.analyserData.length),
+        ),
+      );
+
+      let sumDb = 0;
+      let totalWeight = 0;
+      for (let bin = start; bin < end; bin += 1) {
+        const db = this.analyserData[bin];
+        if (!Number.isFinite(db)) continue;
+        const weight = 1 + ((bin - start) / Math.max(1, end - start)) * 0.16;
+        sumDb += db * weight;
+        totalWeight += weight;
+      }
+
+      const avgDb = totalWeight > 0 ? sumDb / totalWeight : this.analyser.minDecibels;
+      const normalized = Math.max(
+        0,
+        Math.min(1, (avgDb - this.analyser.minDecibels) / dbSpan),
+      );
+      const tiltCompensation =
+        0.76 + (bandIndex / Math.max(1, count - 1)) * 0.5;
+      const shaped = Math.max(
+        0,
+        Math.min(1, Math.pow(normalized, 1.12) * tiltCompensation),
+      );
+      const current = this.visualBandLevels[bandIndex] ?? 0;
+      const smoothing = shaped > current ? 0.38 : 0.16;
+      this.visualBandLevels[bandIndex] = current + (shaped - current) * smoothing;
+    }
+
+    return [...this.visualBandLevels];
+  }
+
   destroy(): void {
     this.stop();
     if (this.vinylNoiseSource) {
@@ -210,10 +291,23 @@ export class VinylEngine {
     if (!track.url) return;
 
     try {
-      const response = await fetch(track.url);
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
-      this.trackBuffers.set(track.id, audioBuffer);
+      // 同一源文件只解码一次
+      let sourceBuffer = this.sourceBuffers.get(track.url);
+      if (!sourceBuffer) {
+        const response = await fetch(track.url);
+        const arrayBuffer = await response.arrayBuffer();
+        sourceBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+        this.sourceBuffers.set(track.url, sourceBuffer);
+      }
+
+      // 虚拟分段：切出 [startOffset, endOffset] 区间
+      if (track.startOffset !== undefined || track.endOffset !== undefined) {
+        const start = track.startOffset ?? 0;
+        const end = track.endOffset ?? sourceBuffer.duration;
+        this.trackBuffers.set(track.id, sliceAudioBuffer(this.ctx, sourceBuffer, start, end));
+      } else {
+        this.trackBuffers.set(track.id, sourceBuffer);
+      }
     } catch (e) {
       console.error(`Failed to load track: ${track.title}`, e);
     }
@@ -361,4 +455,28 @@ export class VinylEngine {
     };
     this.rafId = requestAnimationFrame(tick);
   }
+}
+
+// ─── 工具函数 ────────────────────────────────────────────────────────────────
+
+/**
+ * 从 source AudioBuffer 中切出 [startSec, endSec] 区间，返回新 AudioBuffer。
+ * 用于虚拟分段：同一个源文件按碟面时间范围切片，避免重复解码。
+ */
+function sliceAudioBuffer(
+  ctx: AudioContext,
+  source: AudioBuffer,
+  startSec: number,
+  endSec: number
+): AudioBuffer {
+  const sr = source.sampleRate;
+  const startSample = Math.floor(startSec * sr);
+  const endSample = Math.min(Math.ceil(endSec * sr), source.length);
+  const frameCount = Math.max(0, endSample - startSample);
+
+  const sliced = ctx.createBuffer(source.numberOfChannels, frameCount, sr);
+  for (let ch = 0; ch < source.numberOfChannels; ch++) {
+    sliced.getChannelData(ch).set(source.getChannelData(ch).subarray(startSample, endSample));
+  }
+  return sliced;
 }

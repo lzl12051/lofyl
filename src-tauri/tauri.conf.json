@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Lofi Vinyl",
+  "productName": "LOFYL",
   "version": "0.1.0",
   "identifier": "com.projectlofi.lofivinyl",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Lofi Vinyl",
+        "title": "LOFYL",
         "width": 1440,
         "height": 920,
         "minWidth": 900,

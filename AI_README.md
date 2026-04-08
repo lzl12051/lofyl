@@ -123,7 +123,14 @@ Track
 ├── file?                ← 浏览器导入时保留 File
 ├── sourcePath?          ← 桌面导入时的真实文件路径
 ├── sourceDisplayPath?   ← 用于 UI 展示的相对路径/文件名
-└── url?                 ← Object URL 或 convertFileSrc(...) 结果
+├── url?                 ← Object URL 或 convertFileSrc(...) 结果
+├── startOffset?         ← 虚拟分段：在源文件中的起始时间（秒）
+└── endOffset?           ← 虚拟分段：在源文件中的结束时间（秒）
+
+> 当单个音频文件时长超过 `MAX_SIDE_DURATION`（23 分钟）时，`splitTracksIntoSides` 会调用
+> `expandLongTrack` 将其展开为多个虚拟 Track（id 带 `-seg1`、`-seg2` 后缀），每个虚拟 Track
+> 的 `duration` 为片段时长，`startOffset` / `endOffset` 指向源文件中的实际时间范围。
+> 源文件不会被裁剪或复制，引擎在加载时切片 AudioBuffer。
 ```
 
 ### 真实转换链路
@@ -227,7 +234,11 @@ AudioContext
 ### 关键实现事实
 
 - 单面最大时长常量：`MAX_SIDE_DURATION = 23 * 60`
-- `loadSide()` 会并发抓取并解码当前面的全部曲目，缓存到 `trackBuffers`
+- `loadSide()` 会并发抓取并解码当前面的全部曲目，所有切片操作完成后立即清空 `sourceBuffers` 以释放大块内存，切片结果保留在 `trackBuffers`
+- **虚拟分段的 buffer 加载流程：**
+  - `sourceBuffers`（URL → AudioBuffer）：同一源文件只 fetch + decode 一次
+  - `trackBuffers`（track.id → AudioBuffer）：若 Track 有 `startOffset` / `endOffset`，则切片后存入；否则直接存完整 buffer
+  - `sliceAudioBuffer()` 按样本索引复制区间，创建新的独立 AudioBuffer
 - `playWithOptions(timeInSide)` 支持从任意面内时间起播
 - 当前播放位置的**真实时间基准是 `AudioContext.currentTime`**
 - `requestAnimationFrame` 只用于 UI 侧时间回调与渲染同步，不是底层音频计时来源
@@ -390,6 +401,7 @@ src-tauri/src/lib.rs
 | 2026-04-08 | 创建本文档，记录初始架构 | AI Agent |
 | 2026-04-08 | 按当前实现修正文档：补充真实模型转换链路、状态字段、播放启动/手动落针流程、asset protocol 与实际模块职责 | AI Agent |
 | 2026-04-08 | 补充 Turntable 当前渲染事实：离屏 layer 缓存、DPR 限幅、金属转台静态高光/无 wobble、唱片与唱臂 wobble、盘面沿刻槽高光 | AI Agent |
+| 2026-04-08 | 超长音频文件虚拟分段支持：`Track` 新增 `startOffset?` / `endOffset?`；`albumSplitter.ts` 新增 `expandLongTrack`，在分面前自动将超长单曲展开为虚拟段；`vinylEngine.ts` 新增 URL 级 `sourceBuffers` 缓存与 `sliceAudioBuffer`，同一源文件只解码一次 | AI Agent |
 
 ---
 

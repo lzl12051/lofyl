@@ -6,8 +6,34 @@ export const MAX_SIDE_DURATION = 23 * 60;
 const SIDE_LABELS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'];
 
 /**
- * 将曲目列表按时长分配到碟面。
- * 规则：贪心算法，当前面放不下下一首曲目时就换面。
+ * 将超长的单曲（时长 > maxSideDuration）展开为多个虚拟分段，
+ * 每段带有 startOffset / endOffset，指向源文件中的时间范围。
+ * 若曲目时长在限制内，直接原样返回。
+ */
+export function expandLongTrack(track: Track, maxSideDuration: number): Track[] {
+  if (track.duration <= maxSideDuration) return [track];
+
+  const totalParts = Math.ceil(track.duration / maxSideDuration);
+  const segments: Track[] = [];
+
+  for (let i = 0; i < totalParts; i++) {
+    const startOffset = i * maxSideDuration;
+    const endOffset = Math.min((i + 1) * maxSideDuration, track.duration);
+    segments.push({
+      ...track,
+      id: `${track.id}-seg${i + 1}`,
+      duration: endOffset - startOffset,
+      startOffset,
+      endOffset,
+    });
+  }
+
+  return segments;
+}
+
+/**
+ * 将曲目列表按时长分配到碟面（仅在曲目边界处切面）。
+ * 超长单曲不会在此处展开——展开逻辑由调用方在需要时处理。
  * 每张碟有两面（正反），所以碟片数 = ceil(面数 / 2)。
  */
 export function splitTracksIntoSides(

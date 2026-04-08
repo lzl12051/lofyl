@@ -15,13 +15,22 @@
   export let isPlaying: boolean = false;
   export let isPlatterSpinning: boolean = false;
   export let tonearmState: TonearmState = 'parked';
+  export let musicMeterLevels: number[] = [];
+  export let isSpectrumEnabled: boolean = true;
   export let coverUrl: string | undefined = undefined;
   export let artworkMode: DiscArtworkMode = 'centered';
   export let onSeek: (timeInSide: number) => void = () => {};
   export let onTogglePlay: () => void = () => {};
+  export let onToggleSpectrum: () => void = () => {};
   export let onNeedleDragStart: () => void = () => {};
   export let onNeedleDrop: (timeInSide: number | null) => void = () => {};
   export let onArtworkModeChange: (mode: DiscArtworkMode) => void = () => {};
+
+  const SPECTRUM_ROW_COUNT = 6;
+  const SPECTRUM_COLUMN_COUNT = 16;
+  const SPECTRUM_ROWS = Array.from({ length: SPECTRUM_ROW_COUNT }, (_, index) => index);
+  const EMPTY_SPECTRUM_LEVELS = Array.from({ length: SPECTRUM_COLUMN_COUNT }, () => 0);
+  let displayedSpectrumLevels: number[] = EMPTY_SPECTRUM_LEVELS;
 
   let wrapElement: HTMLDivElement;
   let canvas: HTMLCanvasElement;
@@ -55,7 +64,6 @@
   let platAngle = 0;
   let platterSpeed = 0;
   let lastTimestamp = 0;
-  let wobbleTime = 0;
   let platterSpeedFrom = 0;
   let platterSpeedTo = 0;
   let platterSpeedAnimStart = 0;
@@ -84,12 +92,13 @@
   const PLATTER_SPINDOWN_MS = 5000;
   const TONEARM_CUE_MS = 1500;
   const TONEARM_DROP_MS = 700;
-  const CENTER_X_NORM = 0.46;
-  const CENTER_Y_NORM = 0.5;
+  const CENTER_X_NORM = 0.5;
+  const CENTER_Y_NORM = 0.462;
   const PLATTER_RADIUS_NORM = 0.4;
   const DISC_RADIUS_NORM = 0.382;
-  const PIVOT_X_CANVAS_NORM = 0.93;
-  const PIVOT_Y_CANVAS_NORM = 0.115;
+  const RECORD_ECCENTRICITY_NORM = 0.0022;
+  const PIVOT_X_CANVAS_NORM = 0.955;
+  const PIVOT_Y_CANVAS_NORM = 0.077;
   const NEEDLE_DRAG_HIT_RADIUS = 18;
   const MAX_RENDER_DPR = 1.5;
 
@@ -111,9 +120,17 @@
     tonearmState === 'cueing' ||
     tonearmState === 'dropping' ||
     tonearmState === 'holding';
-  $: targetArmAngle = (tonearmState === 'playing' || tonearmState === 'holding' || tonearmState === 'cueing' || tonearmState === 'dropping' || dragPreviewTime !== null || dragArmAngle !== null)
-    ? (dragArmAngle ?? computeArmAngle(needleRadius))
-    : ARM_PARKED_ANGLE;
+  $: displayedSpectrumLevels =
+    isSpectrumEnabled && musicMeterLevels.length > 0
+      ? musicMeterLevels
+      : EMPTY_SPECTRUM_LEVELS;
+
+  function getSpectrumLitRows(level: number): number {
+    return Math.max(
+      0,
+      Math.min(SPECTRUM_ROW_COUNT, Math.floor(level * (SPECTRUM_ROW_COUNT + 0.35))),
+    );
+  }
 
   function easeInOutCubic(t: number): number {
     return t < 0.5
@@ -133,6 +150,20 @@
   // 转盘缓停：先快后拖尾
   function easeOutQuart(t: number): number {
     return 1 - Math.pow(1 - t, 4);
+  }
+
+  function drawSpacedText(text: string, x: number, y: number, tracking: number) {
+    const chars = [...text];
+    const totalWidth =
+      chars.reduce((sum, char) => sum + ctx.measureText(char).width, 0) +
+      tracking * Math.max(0, chars.length - 1);
+    let cursor = x - totalWidth / 2;
+
+    for (const char of chars) {
+      const width = ctx.measureText(char).width;
+      ctx.fillText(char, cursor + width / 2, y);
+      cursor += width + tracking;
+    }
   }
 
   function startPlatterSpeedAnimation(nextSpeed: number) {
@@ -171,7 +202,7 @@
       cueAnimDuration = 0;
       dropAnimDuration = 0;
       returnAnimDuration = 0;
-      animatedArmAngle = targetArmAngle;
+      animatedArmAngle = resolveTargetArmAngle();
       tonearmLiftPx = 7;
       tonearmAngleJolt = 0;
     } else if (tonearmState === 'dropping') {
@@ -193,9 +224,34 @@
     previousTonearmState = tonearmState;
   }
 
-  function solveStylusPosition(radius: number, pivotX: number, pivotY: number) {
+  // 偏心孔的视觉模型：整张唱片以“一圈一次”的节奏围绕主轴轻微平移，
+  // 唱臂角度也解同一个几何约束，这样两者会保持同相。
+  function getRecordCenterOffsetNorm() {
+    return {
+      x: Math.cos(platAngle) * RECORD_ECCENTRICITY_NORM,
+      y: Math.sin(platAngle) * RECORD_ECCENTRICITY_NORM,
+    };
+  }
+
+  function getRecordCenterOffsetPx(discRadius: number) {
+    const offset = getRecordCenterOffsetNorm();
+    return {
+      x: offset.x * discRadius,
+      y: offset.y * discRadius,
+    };
+  }
+
+  function solveStylusPosition(
+    radius: number,
+    pivotX: number,
+    pivotY: number,
+    recordCenterX: number = 0,
+    recordCenterY: number = 0,
+  ) {
     const clampedRadius = Math.max(GROOVE_INNER_RADIUS, Math.min(GROOVE_OUTER_RADIUS, radius));
-    const pivotToCenter = Math.hypot(pivotX, pivotY);
+    const centerToPivotX = pivotX - recordCenterX;
+    const centerToPivotY = pivotY - recordCenterY;
+    const pivotToCenter = Math.hypot(centerToPivotX, centerToPivotY);
 
     // 圆与圆求交：唱针既在唱片半径 clampedRadius 上，也在以枢轴为圆心、
     // 唱臂长度为半径的轨迹上。选 y 更大的交点，让唱针落在唱片右下侧。
@@ -203,10 +259,10 @@
       (clampedRadius * clampedRadius - ARM_LENGTH_NORM * ARM_LENGTH_NORM + pivotToCenter * pivotToCenter)
       / (2 * pivotToCenter);
     const h = Math.sqrt(Math.max(0, clampedRadius * clampedRadius - a * a));
-    const baseX = (a * pivotX) / pivotToCenter;
-    const baseY = (a * pivotY) / pivotToCenter;
-    const offsetX = (-pivotY / pivotToCenter) * h;
-    const offsetY = (pivotX / pivotToCenter) * h;
+    const baseX = recordCenterX + (a * centerToPivotX) / pivotToCenter;
+    const baseY = recordCenterY + (a * centerToPivotY) / pivotToCenter;
+    const offsetX = (-centerToPivotY / pivotToCenter) * h;
+    const offsetY = (centerToPivotX / pivotToCenter) * h;
 
     const candidateA = { x: baseX + offsetX, y: baseY + offsetY };
     const candidateB = { x: baseX - offsetX, y: baseY - offsetY };
@@ -216,7 +272,7 @@
       x: stylus.x,
       y: stylus.y,
       armAngle: Math.atan2(stylus.y - pivotY, stylus.x - pivotX),
-      discAngle: Math.atan2(stylus.y, stylus.x),
+      discAngle: Math.atan2(stylus.y - recordCenterY, stylus.x - recordCenterX),
     };
   }
 
@@ -248,7 +304,29 @@
   function computeArmAngle(radius: number): number {
     if (!drawW || !drawH) return ARM_PARKED_ANGLE;
     const { pivotNormX, pivotNormY } = getTonearmGeometry(drawW, drawH);
-    return solveStylusPosition(radius, pivotNormX, pivotNormY).armAngle;
+    const recordOffset = getRecordCenterOffsetNorm();
+    return solveStylusPosition(
+      radius,
+      pivotNormX,
+      pivotNormY,
+      recordOffset.x,
+      recordOffset.y,
+    ).armAngle;
+  }
+
+  function resolveTargetArmAngle(radius: number = needleRadius): number {
+    if (
+      tonearmState === 'playing' ||
+      tonearmState === 'holding' ||
+      tonearmState === 'cueing' ||
+      tonearmState === 'dropping' ||
+      dragPreviewTime !== null ||
+      dragArmAngle !== null
+    ) {
+      return dragArmAngle ?? computeArmAngle(radius);
+    }
+
+    return ARM_PARKED_ANGLE;
   }
 
   function syncLayoutBox() {
@@ -345,8 +423,12 @@
       const previousCtx = ctx;
       const layer = createRenderLayer();
       if (!layer) return;
-      drawDisc(drawW, drawH, { applyRotation: false, includeLighting: false });
-      if (side) drawTrackMarkers(drawW, drawH);
+      drawDisc(drawW, drawH, {
+        applyRotation: false,
+        includeLighting: false,
+        applyEccentricity: false,
+      });
+      if (side) drawTrackMarkers(drawW, drawH, false);
       discBaseLayer = finalizeRenderLayer(layer, previousCtx);
       discBaseLayerDirty = false;
     }
@@ -355,7 +437,7 @@
       const previousCtx = ctx;
       const layer = createRenderLayer();
       if (!layer) return;
-      drawDiscLightingLayer(drawW, drawH);
+      drawDiscLightingLayer(drawW, drawH, false);
       discLightingLayer = finalizeRenderLayer(layer, previousCtx);
       discLightingLayerDirty = false;
     }
@@ -369,34 +451,6 @@
     }
   }
 
-  function getMechanicalWobble(radius: number) {
-    const t = wobbleTime;
-    const strength = 0.58 + platterSpeed * 0.9;
-    const armWobbleStrength = strength * 0.38;
-
-    return {
-      platterOffsetX:
-        (Math.sin(t * 0.73) * radius * 0.0014 +
-        Math.sin(t * 1.41 + 0.8) * radius * 0.0005) * strength,
-      platterOffsetY:
-        (Math.cos(t * 0.67 + 0.5) * radius * 0.0012 +
-        Math.sin(t * 1.18 + 1.9) * radius * 0.00045) * strength,
-      platterRotation:
-        Math.sin(t * 0.52 + 0.3) * 0.003 * strength,
-      platterScaleX:
-        1 + Math.sin(t * 0.58 + 0.6) * 0.0011 * strength,
-      platterScaleY:
-        1 + Math.cos(t * 0.54 + 1.7) * 0.0009 * strength,
-      armAngle:
-        (Math.sin(t * 0.84 + 0.2) * 0.0038 +
-        Math.sin(t * 1.63 + 1.1) * 0.0014) * armWobbleStrength,
-      armPivotX:
-        Math.sin(t * 0.62 + 0.9) * radius * 0.001 * armWobbleStrength,
-      armPivotY:
-        Math.cos(t * 0.7 + 1.4) * radius * 0.0009 * armWobbleStrength,
-    };
-  }
-
   function draw(timestamp: number) {
     if (!ctx || drawW === 0) {
       // 布局尺寸首帧有可能还是 0；如果这里直接 return，整条 rAF 渲染循环会永久中断。
@@ -407,7 +461,6 @@
 
     const dt = lastTimestamp ? (timestamp - lastTimestamp) / 1000 : 0;
     lastTimestamp = timestamp;
-    wobbleTime = timestamp / 1000;
 
     // ── 转盘转速动画（spinup/spindown）──────────────────────────
     if (platterSpeedAnimDuration > 0) {
@@ -422,6 +475,7 @@
       }
     }
     platAngle += RAD_PER_SEC * platterSpeed * dt;
+    const targetArmAngle = resolveTargetArmAngle();
 
     // ── 唱臂动画状态机 ─────────────────────────────────────────
     if (isDraggingNeedle) {
@@ -500,6 +554,7 @@
     const W = drawW;
     const H = drawH;
     const turntable = getTurntableGeometry(W, H);
+    const recordOffset = getRecordCenterOffsetPx(turntable.discRadius);
 
     ensureRenderLayers();
 
@@ -523,10 +578,11 @@
     }
 
     drawPlatterStaticHighlights(W, H);
+    drawDiscShadow(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y, turntable.discRadius);
 
     if (discBaseLayer) {
       ctx.save();
-      ctx.translate(turntable.cx, turntable.cy);
+      ctx.translate(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y);
       ctx.rotate(platAngle);
       ctx.drawImage(discBaseLayer, -turntable.cx, -turntable.cy, W, H);
       ctx.restore();
@@ -536,10 +592,15 @@
     }
 
     if (discLightingLayer) {
+      ctx.save();
+      ctx.translate(recordOffset.x, recordOffset.y);
       ctx.drawImage(discLightingLayer, 0, 0, W, H);
+      ctx.restore();
     } else {
       drawDiscLightingLayer(W, H);
     }
+
+    drawSpindle(W, H);
 
     drawTonearm(W, H);
 
@@ -756,43 +817,62 @@
       ctx.fillRect(0, MAIN_H, W, base * 0.024);
     }
 
-    // ── 7. 电源 LED ──────────────────────────────────────────────
     {
-      const ledX = W * 0.074;
-      const ledY = MAIN_H + FRONT_H * 0.5;
-      const ledR = base * 0.012;
+      const plateW = Math.min(W * 0.245, base * 0.335);
+      const plateH = FRONT_H * 0.19;
+      const plateX = (W - plateW) * 0.5;
+      const plateY = MAIN_H + FRONT_H * 0.84;
+      const plateR = plateH * 0.52;
+      const plateTop = plateY - plateH / 2;
+      const textY = plateY + plateH * 0.04;
+      const textSize = Math.max(11, plateH * 0.62);
+      const tracking = Math.max(1.6, textSize * 0.26);
 
-      // 光晕
-      const glow = ctx.createRadialGradient(ledX, ledY, 0, ledX, ledY, ledR * 3.2);
-      glow.addColorStop(0,   'rgba(255, 165, 25, 0.18)');
-      glow.addColorStop(0.45,'rgba(220, 130, 15, 0.07)');
-      glow.addColorStop(1,   'rgba(180, 100, 8, 0)');
+      const plateGrad = ctx.createLinearGradient(plateX, plateTop, plateX, plateTop + plateH);
+      plateGrad.addColorStop(0, 'rgba(86, 61, 28, 0.92)');
+      plateGrad.addColorStop(0.38, 'rgba(53, 37, 18, 0.96)');
+      plateGrad.addColorStop(1, 'rgba(26, 18, 10, 0.98)');
+      ctx.fillStyle = plateGrad;
       ctx.beginPath();
-      ctx.arc(ledX, ledY, ledR * 3.2, 0, Math.PI * 2);
-      ctx.fillStyle = glow;
+      ctx.roundRect(plateX, plateTop, plateW, plateH, plateR);
       ctx.fill();
 
-      // LED 本体
-      const ledG = ctx.createRadialGradient(ledX - ledR * 0.22, ledY - ledR * 0.28, 0, ledX, ledY, ledR);
-      ledG.addColorStop(0,   '#ffb828');
-      ledG.addColorStop(0.5, '#d48018');
-      ledG.addColorStop(1,   '#7a4205');
+      ctx.strokeStyle = 'rgba(255, 230, 174, 0.22)';
+      ctx.lineWidth = 0.9;
       ctx.beginPath();
-      ctx.arc(ledX, ledY, ledR, 0, Math.PI * 2);
-      ctx.fillStyle = ledG;
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(60, 30, 4, 0.55)';
-      ctx.lineWidth   = 0.9;
+      ctx.roundRect(plateX + 0.6, plateTop + 0.6, plateW - 1.2, plateH - 1.2, plateR - 0.5);
       ctx.stroke();
 
-      // POWER 小字
+      const topGleam = ctx.createLinearGradient(plateX, plateTop, plateX, plateTop + plateH * 0.5);
+      topGleam.addColorStop(0, 'rgba(255, 244, 212, 0.22)');
+      topGleam.addColorStop(1, 'rgba(255, 244, 212, 0)');
+      ctx.fillStyle = topGleam;
+      ctx.beginPath();
+      ctx.roundRect(plateX + 1, plateTop + 1, plateW - 2, plateH * 0.48, [plateR - 1, plateR - 1, 0, 0]);
+      ctx.fill();
+
       ctx.save();
-      ctx.font         = `${base * 0.016}px 'Courier New', monospace`;
-      ctx.textAlign    = 'center';
+      ctx.font = `700 ${textSize}px Georgia, "Times New Roman", serif`;
+      ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle    = 'rgba(188, 150, 70, 0.46)';
-      ctx.fillText('POWER', ledX, ledY + ledR * 2.3);
+      const goldText = ctx.createLinearGradient(plateX, plateTop, plateX, plateTop + plateH);
+      goldText.addColorStop(0, '#f2d27a');
+      goldText.addColorStop(0.22, '#e3bf67');
+      goldText.addColorStop(0.52, '#be8d38');
+      goldText.addColorStop(1, '#7a5a1e');
+      ctx.fillStyle = goldText;
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+      ctx.shadowBlur = 2;
+      ctx.shadowOffsetY = 1;
+      drawSpacedText('LOFYL', W * 0.5, textY, tracking);
       ctx.restore();
+
+      ctx.strokeStyle = 'rgba(255, 235, 185, 0.24)';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(plateX + plateW * 0.08, plateTop + plateH * 0.26);
+      ctx.lineTo(plateX + plateW * 0.92, plateTop + plateH * 0.26);
+      ctx.stroke();
     }
 
     // ── 9. 边缘高光与暗边 ─────────────────────────────────────────
@@ -874,8 +954,78 @@
     // 固定灯位下的金属掠射高光，不应跟随转盘旋转。
     ctx.beginPath();
     ctx.arc(0, 0, r * 1.01, -Math.PI * 0.88, -Math.PI * 0.28);
-    ctx.strokeStyle = 'rgba(240, 230, 210, 0.28)';
+    ctx.strokeStyle = 'rgba(248, 234, 190, 0.34)';
     ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.93, -Math.PI * 0.72, -Math.PI * 0.36);
+    ctx.strokeStyle = 'rgba(255, 246, 212, 0.16)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    const metalWash = ctx.createRadialGradient(-r * 0.18, -r * 0.22, r * 0.04, 0, 0, r * 0.92);
+    metalWash.addColorStop(0, 'rgba(255, 244, 210, 0.16)');
+    metalWash.addColorStop(0.22, 'rgba(255, 244, 210, 0.06)');
+    metalWash.addColorStop(1, 'rgba(255, 244, 210, 0)');
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 0.98, 0, Math.PI * 2);
+    ctx.fillStyle = metalWash;
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawDiscShadow(cx: number, cy: number, r: number) {
+    ctx.save();
+    const shadow = ctx.createRadialGradient(
+      cx - r * 0.08,
+      cy - r * 0.06,
+      r * 0.78,
+      cx,
+      cy,
+      r * 1.05,
+    );
+    shadow.addColorStop(0, 'rgba(0,0,0,0)');
+    shadow.addColorStop(0.84, 'rgba(0,0,0,0.02)');
+    shadow.addColorStop(0.94, 'rgba(0,0,0,0.12)');
+    shadow.addColorStop(1, 'rgba(0,0,0,0.2)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * 1.02, 0, Math.PI * 2);
+    ctx.fillStyle = shadow;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawSpindle(W: number, H: number) {
+    const { cx, cy, discRadius: r } = getTurntableGeometry(W, H);
+    const spindleRadius = Math.max(1.7, r * 0.0072);
+    const capRadius = spindleRadius * 1.65;
+
+    ctx.save();
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, capRadius * 1.9, 0, Math.PI * 2);
+    const baseShadow = ctx.createRadialGradient(cx, cy, capRadius * 0.4, cx, cy, capRadius * 1.9);
+    baseShadow.addColorStop(0, 'rgba(0,0,0,0.12)');
+    baseShadow.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = baseShadow;
+    ctx.fill();
+
+    const spindleGrad = ctx.createLinearGradient(cx - spindleRadius, cy - capRadius, cx + spindleRadius, cy + capRadius);
+    spindleGrad.addColorStop(0, '#f1ead8');
+    spindleGrad.addColorStop(0.3, '#cfc5ab');
+    spindleGrad.addColorStop(0.68, '#8d8678');
+    spindleGrad.addColorStop(1, '#efe6cf');
+    ctx.beginPath();
+    ctx.arc(cx, cy, spindleRadius, 0, Math.PI * 2);
+    ctx.fillStyle = spindleGrad;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, capRadius, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,245,220,0.22)';
+    ctx.lineWidth = 0.8;
     ctx.stroke();
 
     ctx.restore();
@@ -889,29 +1039,27 @@
     const { cx, cy, platterRadius: r } = getTurntableGeometry(W, H);
     const applyTransform = options.applyTransform ?? true;
     const includeShadow = options.includeShadow ?? true;
-    const wobble = getMechanicalWobble(r);
 
     if (includeShadow) {
-    drawPlatterShadow(W, H);
-    drawPlatterStaticHighlights(W, H);
+      drawPlatterShadow(W, H);
+      drawPlatterStaticHighlights(W, H);
     }
 
     ctx.save();
     if (applyTransform) {
-      ctx.translate(cx + wobble.platterOffsetX, cy + wobble.platterOffsetY);
-      ctx.rotate(wobble.platterRotation);
-      ctx.scale(wobble.platterScaleX, wobble.platterScaleY);
+      ctx.translate(cx, cy);
+      ctx.rotate(platAngle);
     } else {
       ctx.translate(cx, cy);
     }
 
     // ── 金属转盘本体 ─────────────────────────────────────────────
     const metalG = ctx.createRadialGradient(-r * 0.14, -r * 0.14, r * 0.06, 0, 0, r * 1.04);
-    metalG.addColorStop(0,    '#ddd5c5');
-    metalG.addColorStop(0.38, '#bdb5a5');
-    metalG.addColorStop(0.72, '#9e9688');
-    metalG.addColorStop(0.9,  '#888075');
-    metalG.addColorStop(1,    '#6e6860');
+    metalG.addColorStop(0,    '#d8c18a');
+    metalG.addColorStop(0.34, '#b39157');
+    metalG.addColorStop(0.7,  '#7f6636');
+    metalG.addColorStop(0.9,  '#5d4925');
+    metalG.addColorStop(1,    '#463618');
     ctx.beginPath();
     ctx.arc(0, 0, r * 1.04, 0, Math.PI * 2);
     ctx.fillStyle = metalG;
@@ -930,9 +1078,10 @@
     // ── 橡胶防滑垫 ──────────────────────────────────────────────
     const matR  = r * 0.974;
     const matG = ctx.createRadialGradient(-r * 0.06, -r * 0.06, r * 0.02, 0, 0, matR);
-    matG.addColorStop(0,    '#302e24');
-    matG.addColorStop(0.5,  '#201e16');
-    matG.addColorStop(1,    '#14120e');
+    matG.addColorStop(0,    '#7d8288');
+    matG.addColorStop(0.42, '#5a6066');
+    matG.addColorStop(0.76, '#454a50');
+    matG.addColorStop(1,    '#2c3035');
     ctx.beginPath();
     ctx.arc(0, 0, matR, 0, Math.PI * 2);
     ctx.fillStyle = matG;
@@ -943,7 +1092,7 @@
       const rr = matR * (0.18 + i * 0.12);
       ctx.beginPath();
       ctx.arc(0, 0, rr, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,255,255,0.016)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.03)';
       ctx.lineWidth   = 0.85;
       ctx.stroke();
     }
@@ -954,7 +1103,7 @@
       ctx.beginPath();
       ctx.moveTo(Math.cos(a) * matR * 0.12, Math.sin(a) * matR * 0.12);
       ctx.lineTo(Math.cos(a) * matR * 0.88, Math.sin(a) * matR * 0.88);
-      ctx.strokeStyle = 'rgba(255,255,255,0.012)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.02)';
       ctx.lineWidth   = 0.5;
       ctx.stroke();
     }
@@ -962,7 +1111,7 @@
     // 垫边高光（材质边缘）
     ctx.beginPath();
     ctx.arc(0, 0, matR * 0.999, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(85, 75, 55, 0.5)';
+    ctx.strokeStyle = 'rgba(220, 226, 234, 0.24)';
     ctx.lineWidth   = 1.1;
     ctx.stroke();
 
@@ -972,15 +1121,17 @@
   function drawDisc(
     W: number,
     H: number,
-    options: { applyRotation?: boolean; includeLighting?: boolean } = {},
+    options: { applyRotation?: boolean; includeLighting?: boolean; applyEccentricity?: boolean } = {},
   ) {
     const { cx, cy, discRadius: r } = getTurntableGeometry(W, H);
     const playableInnerRadius = side ? getPlayableInnerRadius(side.totalDuration) : GROOVE_INNER_RADIUS;
     const applyRotation = options.applyRotation ?? true;
     const includeLighting = options.includeLighting ?? true;
+    const applyEccentricity = options.applyEccentricity ?? true;
+    const recordOffset = applyEccentricity ? getRecordCenterOffsetPx(r) : { x: 0, y: 0 };
 
     ctx.save();
-    ctx.translate(cx, cy);
+    ctx.translate(cx + recordOffset.x, cy + recordOffset.y);
     if (applyRotation) {
       ctx.rotate(platAngle);
     }
@@ -990,6 +1141,7 @@
     // 刻槽（同心圆，带微弱光泽）
     const grooveOuterPx = r * GROOVE_OUTER_RADIUS;
     const grooveInnerPx = r * playableInnerRadius;
+    drawOuterLeadInGloss(r, grooveOuterPx);
     for (let i = 0; i <= 90; i++) {
       const t = i / 90;
       const gr = grooveInnerPx + t * (grooveOuterPx - grooveInnerPx);
@@ -1044,35 +1196,30 @@
     }
 
     drawRotatingDiscTexture(r, grooveInnerPx, grooveOuterPx);
-
     drawLabel(r);
     ctx.restore();
 
     if (includeLighting) {
-      drawDiscLighting(cx, cy, r);
+      drawDiscLighting(cx + recordOffset.x, cy + recordOffset.y, r);
     }
   }
 
-  function drawDiscLightingLayer(W: number, H: number) {
+  function drawDiscLightingLayer(W: number, H: number, applyEccentricity: boolean = true) {
     const { cx, cy, discRadius: r } = getTurntableGeometry(W, H);
-    drawDiscLighting(cx, cy, r);
+    const recordOffset = applyEccentricity ? getRecordCenterOffsetPx(r) : { x: 0, y: 0 };
+    drawDiscLighting(cx + recordOffset.x, cy + recordOffset.y, r);
   }
 
   function drawDiscBody(discRadius: number) {
     if (artworkMode === 'overlay' && coverUrl && coverImage) {
-      drawClippedCoverImage(discRadius);
-
-      const coverShade = ctx.createRadialGradient(0, 0, discRadius * 0.12, 0, 0, discRadius);
-      coverShade.addColorStop(0, 'rgba(0,0,0,0.06)');
-      coverShade.addColorStop(0.55, 'rgba(0,0,0,0.12)');
-      coverShade.addColorStop(1, 'rgba(0,0,0,0.34)');
-      ctx.beginPath();
-      ctx.arc(0, 0, discRadius, 0, Math.PI * 2);
-      ctx.fillStyle = coverShade;
-      ctx.fill();
+      drawColoredVinylBody(discRadius);
       return;
     }
 
+    drawStandardDiscBody(discRadius);
+  }
+
+  function drawStandardDiscBody(discRadius: number) {
     ctx.beginPath();
     ctx.arc(0, 0, discRadius, 0, Math.PI * 2);
     const discGrad = ctx.createRadialGradient(-discRadius * 0.1, -discRadius * 0.1, 0, 0, 0, discRadius);
@@ -1081,19 +1228,100 @@
     discGrad.addColorStop(1, '#0e0c08');
     ctx.fillStyle = discGrad;
     ctx.fill();
+
+    const rimGrad = ctx.createRadialGradient(0, 0, discRadius * 0.9, 0, 0, discRadius * 1.01);
+    rimGrad.addColorStop(0, 'rgba(255, 246, 220, 0)');
+    rimGrad.addColorStop(0.72, 'rgba(255, 246, 220, 0)');
+    rimGrad.addColorStop(0.93, 'rgba(255, 246, 220, 0.04)');
+    rimGrad.addColorStop(1, 'rgba(0, 0, 0, 0.22)');
+    ctx.beginPath();
+    ctx.arc(0, 0, discRadius, 0, Math.PI * 2);
+    ctx.fillStyle = rimGrad;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, discRadius * 0.998, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(230, 220, 190, 0.08)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 
-  function drawClippedCoverImage(radius: number) {
-    if (!coverImage) return;
+  function drawOuterLeadInGloss(discRadius: number, grooveOuterPx: number) {
+    const outerBandInner = grooveOuterPx;
+    const outerBandOuter = discRadius * 0.998;
 
+    if (outerBandOuter <= outerBandInner) return;
+
+    const shellGrad = ctx.createRadialGradient(0, 0, outerBandInner, 0, 0, outerBandOuter);
+    shellGrad.addColorStop(0, 'rgba(255,248,228,0)');
+    shellGrad.addColorStop(0.38, 'rgba(255,248,228,0.025)');
+    shellGrad.addColorStop(0.74, 'rgba(255,248,228,0.055)');
+    shellGrad.addColorStop(1, 'rgba(0,0,0,0.12)');
+    ctx.beginPath();
+    ctx.arc(0, 0, outerBandOuter, 0, Math.PI * 2);
+    ctx.arc(0, 0, outerBandInner, 0, Math.PI * 2, true);
+    ctx.fillStyle = shellGrad;
+    ctx.fill('evenodd');
+
+    ctx.beginPath();
+    ctx.arc(0, 0, outerBandInner + (outerBandOuter - outerBandInner) * 0.12, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,244,216,0.08)';
+    ctx.lineWidth = 0.7;
+    ctx.stroke();
+  }
+
+  function drawOuterLeadInHighlight(discRadius: number, grooveOuterPx: number) {
+    const outerBandInner = grooveOuterPx;
+    const outerBandOuter = discRadius * 0.998;
+
+    if (outerBandOuter <= outerBandInner) return;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+
+    const ringHighlight = ctx.createConicGradient(0, 0, 0);
+    ringHighlight.addColorStop(0, 'rgba(255,248,230,0)');
+    ringHighlight.addColorStop(0.08, 'rgba(255,248,230,0)');
+    ringHighlight.addColorStop(0.18, 'rgba(255,248,230,0.16)');
+    ringHighlight.addColorStop(0.28, 'rgba(255,248,230,0.05)');
+    ringHighlight.addColorStop(0.5, 'rgba(255,248,230,0)');
+    ringHighlight.addColorStop(0.68, 'rgba(255,248,230,0.09)');
+    ringHighlight.addColorStop(0.78, 'rgba(255,248,230,0.02)');
+    ringHighlight.addColorStop(1, 'rgba(255,248,230,0)');
+    ctx.strokeStyle = ringHighlight;
+    ctx.lineWidth = Math.max(1.2, discRadius * 0.018);
+    ctx.beginPath();
+    ctx.arc(0, 0, (outerBandInner + outerBandOuter) * 0.5, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const specular = ctx.createConicGradient(0, 0, 0);
+    specular.addColorStop(0, 'rgba(255,252,240,0)');
+    specular.addColorStop(0.12, 'rgba(255,252,240,0)');
+    specular.addColorStop(0.2, 'rgba(255,252,240,0.22)');
+    specular.addColorStop(0.25, 'rgba(255,252,240,0.08)');
+    specular.addColorStop(1, 'rgba(255,252,240,0)');
+    ctx.strokeStyle = specular;
+    ctx.lineWidth = Math.max(0.9, discRadius * 0.01);
+    ctx.beginPath();
+    ctx.arc(0, 0, outerBandOuter - (outerBandOuter - outerBandInner) * 0.28, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function getCoverImagePlacement(radius: number, scale: number = 1) {
+    if (!coverImage) {
+      return { drawWidth: 0, drawHeight: 0, offsetX: 0, offsetY: 0 };
+    }
+
+    const targetSize = radius * 2 * scale;
     const imageSize = Math.max(coverImage.naturalWidth || coverImage.width, 1);
     const imageHeight = Math.max(coverImage.naturalHeight || coverImage.height, 1);
     const imageRatio = imageSize / imageHeight;
-    const targetSize = radius * 2;
     let drawWidth = targetSize;
     let drawHeight = targetSize;
-    let offsetX = -radius;
-    let offsetY = -radius;
+    let offsetX = -targetSize / 2;
+    let offsetY = -targetSize / 2;
 
     if (imageRatio > 1) {
       drawWidth = targetSize * imageRatio;
@@ -1103,11 +1331,86 @@
       offsetY = -drawHeight / 2;
     }
 
+    return { drawWidth, drawHeight, offsetX, offsetY };
+  }
+
+  function drawCoverImage(radius: number, scale: number = 1) {
+    if (!coverImage) return;
+    const { drawWidth, drawHeight, offsetX, offsetY } = getCoverImagePlacement(radius, scale);
+    ctx.drawImage(coverImage, offsetX, offsetY, drawWidth, drawHeight);
+  }
+
+  function drawClippedCoverImage(radius: number) {
+    if (!coverImage) return;
+
     ctx.save();
     ctx.beginPath();
     ctx.arc(0, 0, radius, 0, Math.PI * 2);
     ctx.clip();
-    ctx.drawImage(coverImage, offsetX, offsetY, drawWidth, drawHeight);
+    drawCoverImage(radius);
+    ctx.restore();
+  }
+
+  function drawColoredVinylBody(discRadius: number) {
+    drawStandardDiscBody(discRadius);
+    if (!coverImage) return;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, discRadius, 0, Math.PI * 2);
+    ctx.clip();
+
+    // 让封面图像成为“胶料颜色来源”，而不是一张直接贴上的图。
+    ctx.save();
+    ctx.globalAlpha = 0.88;
+    ctx.filter = `blur(${Math.max(10, discRadius * 0.05)}px) saturate(1.2) contrast(1.06) brightness(0.86)`;
+    drawCoverImage(discRadius, 1.14);
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'soft-light';
+    ctx.globalAlpha = 0.34;
+    ctx.filter = 'saturate(1.35) contrast(1.08)';
+    drawCoverImage(discRadius, 1.02);
+    ctx.restore();
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.globalAlpha = 0.18;
+    ctx.filter = `blur(${Math.max(2, discRadius * 0.014)}px) brightness(0.82)`;
+    drawCoverImage(discRadius, 1.06);
+    ctx.restore();
+
+    const smoke = ctx.createRadialGradient(0, -discRadius * 0.16, discRadius * 0.08, 0, 0, discRadius);
+    smoke.addColorStop(0, 'rgba(255,255,255,0.04)');
+    smoke.addColorStop(0.34, 'rgba(255,248,232,0.025)');
+    smoke.addColorStop(0.62, 'rgba(20,18,16,0.06)');
+    smoke.addColorStop(1, 'rgba(8,6,5,0.22)');
+    ctx.beginPath();
+    ctx.arc(0, 0, discRadius, 0, Math.PI * 2);
+    ctx.fillStyle = smoke;
+    ctx.fill();
+
+    const resinDepth = ctx.createRadialGradient(0, 0, discRadius * 0.34, 0, 0, discRadius * 0.98);
+    resinDepth.addColorStop(0, 'rgba(255,255,255,0)');
+    resinDepth.addColorStop(0.58, 'rgba(255,255,255,0)');
+    resinDepth.addColorStop(0.82, 'rgba(255,248,230,0.03)');
+    resinDepth.addColorStop(1, 'rgba(0,0,0,0.18)');
+    ctx.beginPath();
+    ctx.arc(0, 0, discRadius, 0, Math.PI * 2);
+    ctx.fillStyle = resinDepth;
+    ctx.fill();
+
+    // 彩胶中心通常不会把图案一直印到标签位置，给中区一个更像树脂的过渡。
+    const innerResin = ctx.createRadialGradient(0, 0, discRadius * LABEL_RADIUS * 0.4, 0, 0, discRadius * LABEL_RADIUS * 1.18);
+    innerResin.addColorStop(0, 'rgba(18,14,12,0.34)');
+    innerResin.addColorStop(0.72, 'rgba(12,10,8,0.16)');
+    innerResin.addColorStop(1, 'rgba(12,10,8,0)');
+    ctx.beginPath();
+    ctx.arc(0, 0, discRadius * LABEL_RADIUS * 1.18, 0, Math.PI * 2);
+    ctx.fillStyle = innerResin;
+    ctx.fill();
+
     ctx.restore();
   }
 
@@ -1170,6 +1473,7 @@
 
     const grooveInner = r * LABEL_RADIUS * 1.22;
     const grooveOuter = r * 0.985;
+    drawOuterLeadInHighlight(r, r * GROOVE_OUTER_RADIUS);
     const highlightBands = [
       { start: -2.22, end: -1.48, peak: -1.86, alpha: 0.1, width: 1.1, feather: 0.16 },
       { start: -1.28, end: -0.86, peak: -1.04, alpha: 0.055, width: 0.72, feather: 0.12 },
@@ -1293,9 +1597,10 @@
     ctx.fill();
   }
 
-  function drawTrackMarkers(W: number, H: number) {
+  function drawTrackMarkers(W: number, H: number, applyEccentricity: boolean = true) {
     if (!side || side.tracks.length < 2) return;
     const { cx, cy, discRadius: r } = getTurntableGeometry(W, H);
+    const recordOffset = applyEccentricity ? getRecordCenterOffsetPx(r) : { x: 0, y: 0 };
     const grooveOuterPx = r * GROOVE_OUTER_RADIUS;
     const grooveInnerPx = r * getPlayableInnerRadius(side.totalDuration);
     const markerBandWidth = Math.max(0.95, r * 0.0048);
@@ -1303,7 +1608,7 @@
     const sheenBandWidth = Math.max(0.45, markerBandWidth * 0.24);
 
     ctx.save();
-    ctx.translate(cx, cy);
+    ctx.translate(cx + recordOffset.x, cy + recordOffset.y);
     ctx.beginPath();
     ctx.arc(0, 0, grooveOuterPx, 0, Math.PI * 2);
     ctx.arc(0, 0, grooveInnerPx, 0, Math.PI * 2, true);
@@ -1355,11 +1660,15 @@
       rearWeightOffset,
       shellBaseX,
       shellBaseY,
-      armStartX,
-      armStartY,
-      startHalfWidth,
-      endHalfWidth,
     } = getTonearmRenderState(W, H);
+    const shellLocalX = (shellBaseX - pivotWX) * ux + (shellBaseY - pivotWY) * uy;
+    const shellLocalY = (shellBaseX - pivotWX) * nx + (shellBaseY - pivotWY) * ny;
+    const armStartLocalX = 11;
+    const armLen = Math.max(0, shellLocalX - armStartLocalX);
+    const control1LocalX = armStartLocalX + armLen * 0.26;
+    const control2LocalX = armStartLocalX + armLen * 0.72;
+    const control1LocalY = shellLocalY + armLen * 0.09;
+    const control2LocalY = shellLocalY - armLen * 0.11;
 
     // 基座阴影
     ctx.save();
@@ -1372,7 +1681,7 @@
     // 配重杆
     ctx.save();
     ctx.strokeStyle = '#7f765d';
-    ctx.lineWidth = 5.5;
+    ctx.lineWidth = 6.8;
     ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(pivotWX - ux * 5, pivotWY - uy * 5);
@@ -1392,7 +1701,7 @@
     counterGrad.addColorStop(1, '#2c2822');
     ctx.fillStyle = counterGrad;
     ctx.beginPath();
-    ctx.ellipse(counterweightX, counterweightY, 8.5, 10.5, angle, 0, Math.PI * 2);
+    ctx.ellipse(counterweightX, counterweightY, 9.8, 11.6, angle, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = 'rgba(255,248,228,0.16)';
     ctx.lineWidth = 1;
@@ -1423,41 +1732,91 @@
     ctx.fill();
     ctx.restore();
 
-    // 主臂：渐变金属的细长锥形
+    // 主臂：在唱臂局部坐标内定义弯管形状，避免跟随 wobble 时出现抖动。
     ctx.save();
+    ctx.translate(pivotWX, pivotWY);
+    ctx.rotate(angle);
     ctx.shadowColor = 'rgba(0,0,0,0.28)';
-    ctx.shadowBlur = 5;
+    ctx.shadowBlur = 6;
     ctx.shadowOffsetY = 2;
-    const armGrad = ctx.createLinearGradient(armStartX, armStartY, shellBaseX, shellBaseY);
-    armGrad.addColorStop(0, '#8e8467');
-    armGrad.addColorStop(0.18, '#d9cfab');
-    armGrad.addColorStop(0.5, '#b9ad88');
-    armGrad.addColorStop(0.78, '#ebe0b7');
-    armGrad.addColorStop(1, '#8b8063');
-    ctx.fillStyle = armGrad;
+    const armGrad = ctx.createLinearGradient(
+      armStartLocalX,
+      -6,
+      shellLocalX,
+      6
+    );
+    armGrad.addColorStop(0, '#6d6554');
+    armGrad.addColorStop(0.16, '#d8cda8');
+    armGrad.addColorStop(0.42, '#9f9478');
+    armGrad.addColorStop(0.7, '#f1e6c0');
+    armGrad.addColorStop(1, '#756b58');
+    ctx.strokeStyle = armGrad;
+    ctx.lineWidth = 8.8;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
     ctx.beginPath();
-    ctx.moveTo(armStartX + nx * startHalfWidth, armStartY + ny * startHalfWidth);
-    ctx.lineTo(armStartX - nx * startHalfWidth, armStartY - ny * startHalfWidth);
-    ctx.lineTo(shellBaseX - nx * endHalfWidth, shellBaseY - ny * endHalfWidth);
-    ctx.lineTo(shellBaseX + nx * endHalfWidth, shellBaseY + ny * endHalfWidth);
-    ctx.closePath();
-    ctx.fill();
+    ctx.moveTo(armStartLocalX, 0);
+    ctx.bezierCurveTo(
+      control1LocalX,
+      control1LocalY,
+      control2LocalX,
+      control2LocalY,
+      shellLocalX,
+      shellLocalY,
+    );
+    ctx.stroke();
     ctx.restore();
 
     // 主臂高光与下缘阴影
     ctx.save();
-    ctx.strokeStyle = 'rgba(255,249,229,0.42)';
-    ctx.lineWidth = 1.15;
+    ctx.translate(pivotWX, pivotWY);
+    ctx.rotate(angle);
+    ctx.strokeStyle = 'rgba(255,249,229,0.44)';
+    ctx.lineWidth = 2.2;
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(armStartX + nx * 1.1, armStartY + ny * 1.1);
-    ctx.lineTo(shellBaseX + nx * 0.7, shellBaseY + ny * 0.7);
+    ctx.moveTo(armStartLocalX, 1.2);
+    ctx.bezierCurveTo(
+      control1LocalX,
+      control1LocalY + 1.4,
+      control2LocalX,
+      control2LocalY + 0.9,
+      shellLocalX,
+      shellLocalY + 0.7,
+    );
     ctx.stroke();
-    ctx.strokeStyle = 'rgba(76,64,42,0.28)';
-    ctx.lineWidth = 0.9;
+    ctx.strokeStyle = 'rgba(76,64,42,0.34)';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(armStartX - nx * 1.6, armStartY - ny * 1.6);
-    ctx.lineTo(shellBaseX - nx * 1.2, shellBaseY - ny * 1.2);
+    ctx.moveTo(armStartLocalX, -2);
+    ctx.bezierCurveTo(
+      control1LocalX,
+      control1LocalY - 2.2,
+      control2LocalX,
+      control2LocalY - 1.5,
+      shellLocalX,
+      shellLocalY - 1.3,
+    );
+    ctx.stroke();
+    ctx.restore();
+
+    // 弯臂下方的次级阴影，补一点厚度
+    ctx.save();
+    ctx.translate(pivotWX, pivotWY);
+    ctx.rotate(angle);
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+    ctx.lineWidth = 5.6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(armStartLocalX, -0.8);
+    ctx.bezierCurveTo(
+      control1LocalX,
+      control1LocalY - 1.1,
+      control2LocalX,
+      control2LocalY - 0.9,
+      shellLocalX,
+      shellLocalY - 0.7,
+    );
     ctx.stroke();
     ctx.restore();
 
@@ -1465,16 +1824,16 @@
     ctx.save();
     ctx.translate(shellBaseX, shellBaseY);
     ctx.rotate(angle);
-    const shellGrad = ctx.createLinearGradient(-12, 0, 4, 0);
-    shellGrad.addColorStop(0, '#7e755c');
-    shellGrad.addColorStop(0.55, '#d0c49f');
-    shellGrad.addColorStop(1, '#736a52');
+    const shellGrad = ctx.createLinearGradient(-14, 0, 5, 0);
+    shellGrad.addColorStop(0, '#6e6653');
+    shellGrad.addColorStop(0.55, '#d7ca9f');
+    shellGrad.addColorStop(1, '#6f6754');
     ctx.fillStyle = shellGrad;
     ctx.beginPath();
-    ctx.moveTo(-12, -3.4);
-    ctx.lineTo(-10, 3.8);
-    ctx.lineTo(1.5, 2.8);
-    ctx.lineTo(3.2, -2.5);
+    ctx.moveTo(-14.5, -4.1);
+    ctx.lineTo(-11.8, 4.5);
+    ctx.lineTo(2.2, 3.3);
+    ctx.lineTo(4.2, -2.9);
     ctx.closePath();
     ctx.fill();
     ctx.strokeStyle = 'rgba(255,248,228,0.2)';
@@ -1483,9 +1842,9 @@
 
     // 唱头
     ctx.fillStyle = '#4b463d';
-    ctx.fillRect(-2.5, -3.2, 7.6, 6.4);
+    ctx.fillRect(-3.1, -3.6, 8.6, 7.2);
     ctx.fillStyle = '#6a6356';
-    ctx.fillRect(0.5, -2.4, 3.8, 4.8);
+    ctx.fillRect(0.8, -2.7, 4.3, 5.3);
 
     // 唱针杆与针尖
     ctx.strokeStyle = '#3b332b';
@@ -1509,10 +1868,9 @@
 
   function getTonearmRenderState(W: number, H: number, armAngle: number = animatedArmAngle) {
     const { pivotX, pivotY, armLengthPx } = getTonearmGeometry(W, H);
-    const wobble = getMechanicalWobble(armLengthPx);
-    const angle = armAngle + wobble.armAngle + tonearmAngleJolt;
-    const pivotWX = pivotX + wobble.armPivotX;
-    const pivotWY = pivotY + wobble.armPivotY;
+    const angle = armAngle + tonearmAngleJolt;
+    const pivotWX = pivotX;
+    const pivotWY = pivotY;
     const ux = Math.cos(angle);
     const uy = Math.sin(angle);
     const nx = -uy;
@@ -1559,8 +1917,12 @@
     if (!side) return null;
 
     const { cx, cy, discRadius: r } = getTurntableGeometry(drawW, drawH);
+    const recordOffset = getRecordCenterOffsetPx(r);
     const playableInnerRadius = getPlayableInnerRadius(side.totalDuration);
-    const normalizedRadius = Math.hypot(x - cx, y - cy) / r;
+    const normalizedRadius = Math.hypot(
+      x - (cx + recordOffset.x),
+      y - (cy + recordOffset.y),
+    ) / r;
     const playableSpan = GROOVE_OUTER_RADIUS - playableInnerRadius;
 
     if (playableSpan <= 0) return 0;
@@ -1741,7 +2103,7 @@
       title="拖动唱针头控制播放位置"
     ></canvas>
 
-    <div class="machine-console">
+    <div class="machine-front-controls">
       <button
         class="console-btn"
         class:engaged={transportEngaged}
@@ -1750,13 +2112,36 @@
         type="button"
       >
         <span class="console-led" aria-hidden="true"></span>
-        <span class="console-btn-text">{transportEngaged ? 'STOP' : 'PLAY'}</span>
+        <span class="console-btn-text">PLAY</span>
       </button>
-    </div>
 
-    <div class="machine-art-switch" aria-label="封面显示模式">
-      <span class="art-switch-label">ARTWORK</span>
-      <div class="art-switch-btns">
+      <button
+        class="console-btn console-btn-compact"
+        class:engaged={isSpectrumEnabled}
+        on:click={onToggleSpectrum}
+        aria-label={isSpectrumEnabled ? '关闭频谱计' : '开启频谱计'}
+        type="button"
+      >
+        <span class="console-led" aria-hidden="true"></span>
+        <span class="console-btn-text">SPEC</span>
+      </button>
+
+      <div
+        class="front-spectrum"
+        class:disabled={!isSpectrumEnabled}
+        aria-hidden="true"
+      >
+        {#each displayedSpectrumLevels as level}
+          {@const litRows = getSpectrumLitRows(level)}
+          <div class="spectrum-column">
+            {#each SPECTRUM_ROWS as row}
+              <span class="spectrum-cell" class:lit={row < litRows}></span>
+            {/each}
+          </div>
+        {/each}
+      </div>
+
+      <div class="art-switch-btns machine-art-toggle" role="group" aria-label="封面显示模式">
         <button
           class="art-btn"
           class:active={artworkMode === 'overlay'}
@@ -1807,35 +2192,18 @@
     cursor: grabbing;
   }
 
-  /* ── Machine console (bottom-left) ── */
-  .machine-console {
+  .machine-front-controls {
     position: absolute;
-    bottom: 3.8%;
-    left: 5%;
+    left: 50%;
+    bottom: 3.9%;
+    transform: translateX(-50%);
     z-index: 1;
     display: flex;
     align-items: center;
+    justify-content: center;
+    gap: 10px;
     font-family: 'Courier New', monospace;
-  }
-
-  /* ── Artwork mode switch (bottom-right) ── */
-  .machine-art-switch {
-    position: absolute;
-    bottom: 3.5%;
-    right: 4.5%;
-    z-index: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 4px;
-    font-family: 'Courier New', monospace;
-  }
-
-  .art-switch-label {
-    font-size: 7px;
-    letter-spacing: 0.2em;
-    color: rgba(195, 160, 95, 0.38);
-    text-transform: uppercase;
+    width: min(86%, 520px);
   }
 
   .art-switch-btns {
@@ -1851,6 +2219,75 @@
       0 1px 0 rgba(255, 230, 155, 0.04);
   }
 
+  .machine-art-toggle {
+    flex: 0 0 auto;
+  }
+
+  .front-spectrum {
+    flex: 1 1 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-width: 0;
+    height: 42px;
+    padding: 5px 12px;
+    background: linear-gradient(180deg, rgba(121, 100, 63, 0.94) 0%, rgba(33, 25, 15, 0.98) 100%);
+    border: 1px solid #0b0906;
+    border-top-color: rgba(255, 235, 185, 0.12);
+    border-radius: 8px;
+    box-shadow:
+      inset 0 2px 6px rgba(0, 0, 0, 0.65),
+      inset 0 -1px 0 rgba(255, 230, 155, 0.04),
+      0 1px 0 rgba(255, 230, 155, 0.06);
+  }
+
+  .front-spectrum.disabled {
+    filter: saturate(0.4) brightness(0.78);
+  }
+
+  .spectrum-column {
+    display: flex;
+    flex-direction: column-reverse;
+    justify-content: center;
+    gap: 2px;
+    height: 100%;
+  }
+
+  .spectrum-cell {
+    width: 7px;
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(48, 68, 40, 0.24);
+    border: 1px solid rgba(160, 188, 120, 0.05);
+    transition: background 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+  }
+
+  .spectrum-cell.lit:nth-child(-n + 3) {
+    background: #9cff73;
+    border-color: rgba(210, 255, 194, 0.3);
+    box-shadow:
+      0 0 6px rgba(156, 255, 115, 0.35),
+      0 0 12px rgba(156, 255, 115, 0.12);
+  }
+
+  .spectrum-cell.lit:nth-child(4),
+  .spectrum-cell.lit:nth-child(5) {
+    background: #ffb347;
+    border-color: rgba(255, 222, 170, 0.3);
+    box-shadow:
+      0 0 6px rgba(255, 179, 71, 0.38),
+      0 0 12px rgba(255, 179, 71, 0.12);
+  }
+
+  .spectrum-cell.lit:nth-child(6) {
+    background: #ff6f3c;
+    border-color: rgba(255, 201, 182, 0.34);
+    box-shadow:
+      0 0 7px rgba(255, 111, 60, 0.42),
+      0 0 14px rgba(255, 111, 60, 0.14);
+  }
+
   .art-btn {
     padding: 5px 9px;
     font-family: 'Courier New', monospace;
@@ -1862,12 +2299,18 @@
     border: 0;
     border-radius: 4px;
     cursor: pointer;
-    transition: background 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+    text-shadow:
+      0 0 4px rgba(255, 196, 104, 0.08),
+      0 0 10px rgba(255, 196, 104, 0.04);
+    transition: background 0.14s ease, color 0.14s ease, box-shadow 0.14s ease, text-shadow 0.14s ease;
     text-transform: uppercase;
   }
 
   .art-btn:hover:not(.active) {
     color: rgba(200, 162, 82, 0.65);
+    text-shadow:
+      0 0 6px rgba(255, 196, 104, 0.18),
+      0 0 14px rgba(255, 196, 104, 0.08);
   }
 
   .art-btn.active {
@@ -1876,6 +2319,9 @@
     box-shadow:
       inset 0 1px 4px rgba(0, 0, 0, 0.55),
       inset 0 -1px 0 rgba(255, 230, 140, 0.04);
+    text-shadow:
+      0 0 6px rgba(255, 204, 118, 0.42),
+      0 0 14px rgba(255, 204, 118, 0.16);
   }
 
   /* ── Play / Stop button ── */
@@ -1914,6 +2360,10 @@
       inset 0 1px 0 rgba(255, 230, 155, 0.02);
   }
 
+  .console-btn-compact {
+    min-width: 48px;
+  }
+
   .console-led {
     width: 8px;
     height: 8px;
@@ -1936,12 +2386,18 @@
     font-weight: 700;
     letter-spacing: 0.24em;
     color: rgba(218, 190, 135, 0.52);
+    text-shadow:
+      0 0 5px rgba(255, 205, 125, 0.16),
+      0 0 12px rgba(255, 205, 125, 0.06);
     text-transform: uppercase;
-    transition: color 0.15s ease;
+    transition: color 0.15s ease, text-shadow 0.15s ease;
   }
 
   .console-btn.engaged .console-btn-text {
     color: rgba(218, 190, 135, 0.88);
+    text-shadow:
+      0 0 7px rgba(255, 208, 130, 0.42),
+      0 0 16px rgba(255, 208, 130, 0.16);
   }
 
 </style>

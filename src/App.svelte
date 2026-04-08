@@ -47,6 +47,9 @@
   let discArtworkMode: DiscArtworkMode = "centered";
   let startSequenceToken = 0;
   let manualSpinupStartedAt: number | null = null;
+  const MUSIC_METER_BANDS = 16;
+  let musicMeterLevels = createEmptyMusicMeterLevels();
+  let isSpectrumEnabled = true;
   let albumTitleDraft = "";
   let titleDraftAlbumId: string | null = null;
   let isEditorOpen = false;
@@ -64,6 +67,14 @@
   const TONEARM_CUE_MS = 1500;
   const TONEARM_SETTLE_PAUSE_MS = 110;
   const TONEARM_DROP_MS = 700;
+
+  function createEmptyMusicMeterLevels(): number[] {
+    return Array.from({ length: MUSIC_METER_BANDS }, () => 0);
+  }
+
+  function resetMusicMeter() {
+    musicMeterLevels = createEmptyMusicMeterLevels();
+  }
 
   $: selectedAlbum =
     libraryAlbums.find((album) => album.id === selectedAlbumId) ?? null;
@@ -111,20 +122,24 @@
     isPlatterSpinning = false;
     tonearmState = "parked";
     manualSpinupStartedAt = null;
+    resetMusicMeter();
   }
 
   function bindEngineCallbacks(targetEngine: VinylEngine) {
     targetEngine.onTimeUpdate = (time) => {
       currentTime = time;
+      musicMeterLevels = targetEngine.getVisualLevels(MUSIC_METER_BANDS);
     };
 
     targetEngine.onSideEnded = () => {
       cancelStartupSequence();
+      targetEngine.stopLeadInNoise();
       isPlaying = false;
       isPlatterSpinning = false;
       tonearmState = "parked";
       currentTime = currentSide?.totalDuration ?? 0;
       manualSpinupStartedAt = null;
+      resetMusicMeter();
     };
   }
 
@@ -326,6 +341,7 @@
     isPlatterSpinning = false;
     tonearmState = "parked";
     clearManualCueState();
+    resetMusicMeter();
   }
 
   async function beginPlaybackSequence() {
@@ -354,6 +370,7 @@
     await engine.playWithOptions(currentTime, { keepNoise: true });
     if (token !== startSequenceToken) {
       engine.stop();
+      resetMusicMeter();
       return;
     }
 
@@ -417,6 +434,7 @@
     await engine.playWithOptions(timeInSide, { keepNoise: true });
     if (token !== startSequenceToken) {
       engine.stop();
+      resetMusicMeter();
       return;
     }
 
@@ -441,6 +459,7 @@
       isPlatterSpinning = false;
       tonearmState = "parked";
       clearManualCueState();
+      resetMusicMeter();
     } else {
       await beginPlaybackSequence();
     }
@@ -469,6 +488,7 @@
     isPlatterSpinning = false;
     tonearmState = "parked";
     clearManualCueState();
+    resetMusicMeter();
 
     currentSideIndex = index;
     currentTime = 0;
@@ -497,8 +517,8 @@
         <div class="library-shell">
           <div class="panel-head library-marquee">
             <div class="panel-title-block">
-              <div class="eyebrow">MUSIC LIBRARY</div>
-              <h1 class="panel-title">专辑库</h1>
+              <div class="eyebrow">LOFYL</div>
+              <h1 class="panel-title">LOFYL</h1>
             </div>
 
             <div class="panel-toolbar" aria-label="导入新专辑与曲库控制">
@@ -557,9 +577,9 @@
                     >
                     <div class="selected-album-stats">
                       <span
-                        >{Math.ceil(selectedAlbum.sides.length / 2)} 张碟</span
+                        >{playbackAlbum?.discs ?? Math.ceil(selectedAlbum.sides.length / 2)} 张碟</span
                       >
-                      <span>{selectedAlbum.sides.length} 面</span>
+                      <span>{playbackAlbum?.sides.length ?? selectedAlbum.sides.length} 面</span>
                       <span>{countAlbumTracks(selectedAlbum)} 首</span>
                       <span>{formatTime(getAlbumDuration(selectedAlbum))}</span>
                     </div>
@@ -652,6 +672,7 @@
             {:else}
               <div class="album-list">
                 {#each libraryAlbums as item, index}
+                  {@const pb = libraryAlbumToPlaybackAlbum(item)}
                   <button
                     class="album-card"
                     class:active={item.id === selectedAlbumId}
@@ -664,8 +685,7 @@
                     <span class="album-card-copy">
                       <span class="album-card-title">{item.title}</span>
                       <span class="album-card-meta">
-                        {Math.ceil(item.sides.length / 2)} 张碟 · {item.sides
-                          .length} 面 · {countAlbumTracks(item)} 首
+                        {pb.discs} 张碟 · {pb.sides.length} 面 · {countAlbumTracks(item)} 首
                       </span>
                     </span>
                     {#if item.id === selectedAlbumId}
@@ -695,8 +715,7 @@
               <div class="section-label">专辑编辑</div>
               <div class="drawer-title">{selectedAlbum.title}</div>
               <div class="arranger-meta">
-                {Math.ceil(selectedAlbum.sides.length / 2)} 张碟 · {selectedAlbum
-                  .sides.length} 面 ·
+                {playbackAlbum?.discs ?? Math.ceil(selectedAlbum.sides.length / 2)} 张碟 · {playbackAlbum?.sides.length ?? selectedAlbum.sides.length} 面 ·
                 {countAlbumTracks(selectedAlbum)} 首 · {formatTime(
                   getAlbumDuration(selectedAlbum),
                 )}
@@ -832,15 +851,8 @@
     </aside>
 
     <section class="turntable-panel">
-      <div class="turntable-head">
-        <div class="turntable-heading">
-          <span class="eyebrow">TURNTABLE</span>
-          {#if selectedAlbum}
-            <h2>{selectedAlbum.title}</h2>
-          {/if}
-        </div>
-
-        <div class="turntable-head-right">
+      {#if isLoading || isSavingLibrary}
+        <div class="turntable-status-bar">
           {#if isLoading}
             <span class="status-pill">加载中</span>
           {/if}
@@ -848,7 +860,7 @@
             <span class="status-pill">已写入</span>
           {/if}
         </div>
-      </div>
+      {/if}
 
       <div class="turntable-stage">
         <Turntable
@@ -857,10 +869,15 @@
           {isPlaying}
           {isPlatterSpinning}
           {tonearmState}
+          {musicMeterLevels}
+          {isSpectrumEnabled}
           coverUrl={playbackAlbum?.coverUrl}
           artworkMode={discArtworkMode}
           onArtworkModeChange={(mode) => {
             discArtworkMode = mode;
+          }}
+          onToggleSpectrum={() => {
+            isSpectrumEnabled = !isSpectrumEnabled;
           }}
           onSeek={handleSeek}
           onTogglePlay={togglePlay}
@@ -914,10 +931,6 @@
     padding: 44px 0 0;
     gap: 0;
     border-radius: 0 10px 10px 0;
-  }
-
-  main.desktop-overlay-shell .turntable-head {
-    padding: 0 18px 10px;
   }
 
   .titlebar-drag-region {
@@ -1048,8 +1061,7 @@
   }
 
   .panel-head,
-  .arranger-head,
-  .turntable-head {
+  .arranger-head {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -1079,17 +1091,12 @@
       0 16px 30px rgba(94, 59, 23, 0.12);
   }
 
-  .turntable-head {
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .turntable-head-right {
+  .turntable-status-bar {
     display: flex;
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
-    flex-shrink: 0;
+    justify-content: flex-end;
   }
 
   .eyebrow {
@@ -1100,8 +1107,7 @@
     font-family: "Courier New", monospace;
   }
 
-  .panel-title,
-  .turntable-heading h2 {
+  .panel-title {
     font-size: calc(18px * var(--app-font-scale));
     line-height: 1.2;
     color: #2a1802;
@@ -1121,17 +1127,6 @@
     justify-content: flex-start;
     gap: 8px;
     padding-top: 2px;
-  }
-
-  .turntable-heading {
-    flex: 0 1 auto;
-    min-width: 0;
-  }
-
-  .turntable-heading h2 {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .status-pill {
@@ -1939,13 +1934,12 @@
       grid-template-columns: 1fr;
     }
 
-    .turntable-head,
     .arranger-head {
       flex-direction: column;
       align-items: stretch;
     }
 
-    .turntable-head-right {
+    .turntable-status-bar {
       justify-content: flex-start;
     }
 
