@@ -75,5 +75,4 @@ jobs:
             Download the asset that matches your macOS or Windows system.
           releaseDraft: false
           prerelease: false
-          tauriScript: npm run desktop:build --
           args: ${{ matrix.args }}
