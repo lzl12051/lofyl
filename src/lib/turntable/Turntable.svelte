@@ -52,10 +52,15 @@
   let platterLayer: HTMLCanvasElement | null = null;
   let discBaseLayer: HTMLCanvasElement | null = null;
   let discLightingLayer: HTMLCanvasElement | null = null;
+  let platterShadowLayer: HTMLCanvasElement | null = null;
+  let platterHighlightsLayer: HTMLCanvasElement | null = null;
+  let discShadowLayer: HTMLCanvasElement | null = null;
+  let spindleLayer: HTMLCanvasElement | null = null;
   let machineLayerDirty = true;
   let platterLayerDirty = true;
   let discBaseLayerDirty = true;
   let discLightingLayerDirty = true;
+  let staticLayersDirty = true;
 
   // CSS 逻辑像素尺寸（用于所有绘图计算）
   let drawW = 0;
@@ -101,6 +106,9 @@
   const PIVOT_Y_CANVAS_NORM = 0.077;
   const NEEDLE_DRAG_HIT_RADIUS = 18;
   const MAX_RENDER_DPR = 1.5;
+  const PLAYBACK_TARGET_FPS = 48;
+  const PLAYBACK_FRAME_INTERVAL_MS = 1000 / PLAYBACK_TARGET_FPS;
+  let lastPaintTimestamp = 0;
 
   // 唱臂枢轴（归一化，相对于碟心和碟片半径）
   // 目标造型：
@@ -120,10 +128,23 @@
     tonearmState === 'cueing' ||
     tonearmState === 'dropping' ||
     tonearmState === 'holding';
-  $: displayedSpectrumLevels =
-    isSpectrumEnabled && musicMeterLevels.length > 0
-      ? musicMeterLevels
-      : EMPTY_SPECTRUM_LEVELS;
+  let prevLitPattern: number[] = [];
+  $: {
+    const rawLevels =
+      isSpectrumEnabled && musicMeterLevels.length > 0
+        ? musicMeterLevels
+        : EMPTY_SPECTRUM_LEVELS;
+    const newPattern = rawLevels.map((l) => getSpectrumLitRows(l));
+    if (newPattern.length !== prevLitPattern.length || newPattern.some((v, i) => v !== prevLitPattern[i])) {
+      prevLitPattern = newPattern;
+      displayedSpectrumLevels = rawLevels;
+    }
+  }
+
+  // Trigger canvas redraw when currentTime changes during playback
+  $: if (currentTime && transportEngaged) {
+    requestDraw();
+  }
 
   function getSpectrumLitRows(level: number): number {
     return Math.max(
@@ -166,12 +187,49 @@
     }
   }
 
+  function isAnimating(): boolean {
+    return (
+      platterSpeed > 0 ||
+      platterSpeedAnimDuration > 0 ||
+      cueAnimDuration > 0 ||
+      dropAnimDuration > 0 ||
+      returnAnimDuration > 0 ||
+      isDraggingNeedle ||
+      Math.abs(animatedArmAngle - resolveTargetArmAngle()) > 0.001
+    );
+  }
+
+  function requestDraw() {
+    if (animationId === null) {
+      lastTimestamp = 0;
+      lastPaintTimestamp = 0;
+      animationId = requestAnimationFrame(draw);
+    }
+  }
+
+  function resolveRenderDpr(width: number, height: number): number {
+    const deviceDpr = window.devicePixelRatio || 1;
+    const pixelArea = width * height;
+    let cap = MAX_RENDER_DPR;
+
+    if (pixelArea >= 540_000) {
+      cap = 1;
+    } else if (pixelArea >= 360_000) {
+      cap = 1.15;
+    } else if (pixelArea >= 250_000) {
+      cap = 1.25;
+    }
+
+    return Math.min(deviceDpr, cap);
+  }
+
   function startPlatterSpeedAnimation(nextSpeed: number) {
     const now = performance.now();
     platterSpeedFrom = platterSpeed;
     platterSpeedTo = nextSpeed;
     platterSpeedAnimStart = now;
     platterSpeedAnimDuration = nextSpeed > platterSpeed ? PLATTER_SPINUP_MS : PLATTER_SPINDOWN_MS;
+    requestDraw();
   }
 
   function startCueAnimation(nextAngle: number) {
@@ -179,11 +237,13 @@
     cueTargetAngle = nextAngle;
     cueAnimStart = performance.now();
     cueAnimDuration = TONEARM_CUE_MS;
+    requestDraw();
   }
 
   function startDropAnimation() {
     dropAnimStart = performance.now();
     dropAnimDuration = TONEARM_DROP_MS;
+    requestDraw();
   }
 
   $: if (isPlatterSpinning !== previousPlatterSpin) {
@@ -205,6 +265,7 @@
       animatedArmAngle = resolveTargetArmAngle();
       tonearmLiftPx = 7;
       tonearmAngleJolt = 0;
+      requestDraw();
     } else if (tonearmState === 'dropping') {
       startDropAnimation();
     } else if (tonearmState === 'parked') {
@@ -216,9 +277,11 @@
         returnArmFromAngle = animatedArmAngle;
         returnAnimStart = performance.now();
         returnAnimDuration = 5000;
+        requestDraw();
       } else {
         returnAnimDuration = 0;
         tonearmLiftPx = 0;
+        requestDraw();
       }
     }
     previousTonearmState = tonearmState;
@@ -345,9 +408,9 @@
     if (!canvas || !ctx) return;
     syncLayoutBox();
 
-    const dpr = Math.min(window.devicePixelRatio || 1, MAX_RENDER_DPR);
     const nextDrawW = canvasDisplaySize || canvas.clientWidth;
     const nextDrawH = canvasDisplaySize || canvas.clientHeight || nextDrawW;
+    const dpr = resolveRenderDpr(nextDrawW, nextDrawH);
 
     if (!nextDrawW || !nextDrawH) return;
     if (drawW === nextDrawW && drawH === nextDrawH && canvas.width === nextDrawW * dpr && canvas.height === nextDrawH * dpr) {
@@ -364,6 +427,11 @@
     platterLayerDirty = true;
     discBaseLayerDirty = true;
     discLightingLayerDirty = true;
+    staticLayersDirty = true;
+
+    // 调整 canvas 内部分辨率会立即清空当前画面。
+    // 这里先把上一版缓存层按新尺寸回填到主画布，避免 resize 时出现整块空白。
+    paintFrame({ rebuildLayers: false });
   }
 
   function scheduleCanvasSync() {
@@ -374,6 +442,7 @@
     scheduledSyncId = requestAnimationFrame(() => {
       scheduledSyncId = null;
       syncCanvasSize();
+      requestDraw();
     });
   }
 
@@ -443,18 +512,161 @@
     }
   }
 
+  function rebuildStaticLayers() {
+    if (!ctx) return;
+
+    {
+      const previousCtx = ctx;
+      const layer = createRenderLayer();
+      if (!layer) return;
+      drawPlatterShadow(drawW, drawH);
+      platterShadowLayer = finalizeRenderLayer(layer, previousCtx);
+    }
+
+    {
+      const previousCtx = ctx;
+      const layer = createRenderLayer();
+      if (!layer) return;
+      drawPlatterStaticHighlights(drawW, drawH);
+      platterHighlightsLayer = finalizeRenderLayer(layer, previousCtx);
+    }
+
+    {
+      const previousCtx = ctx;
+      const layer = createRenderLayer();
+      if (!layer) return;
+      const { cx, cy, discRadius } = getTurntableGeometry(drawW, drawH);
+      drawDiscShadow(cx, cy, discRadius);
+      discShadowLayer = finalizeRenderLayer(layer, previousCtx);
+    }
+
+    {
+      const previousCtx = ctx;
+      const layer = createRenderLayer();
+      if (!layer) return;
+      drawSpindle(drawW, drawH);
+      spindleLayer = finalizeRenderLayer(layer, previousCtx);
+    }
+
+    staticLayersDirty = false;
+  }
+
   function ensureRenderLayers() {
     if (machineLayerDirty || !machineLayer) rebuildMachineLayer();
     if (platterLayerDirty || !platterLayer) rebuildPlatterLayer();
     if (discBaseLayerDirty || !discBaseLayer || discLightingLayerDirty || !discLightingLayer) {
       rebuildDiscLayers();
     }
+    if (staticLayersDirty || !platterShadowLayer || !platterHighlightsLayer || !discShadowLayer || !spindleLayer) {
+      rebuildStaticLayers();
+    }
+  }
+
+  function shouldThrottlePlaybackFrame(): boolean {
+    return (
+      platterSpeed > 0 &&
+      platterSpeedAnimDuration === 0 &&
+      cueAnimDuration === 0 &&
+      dropAnimDuration === 0 &&
+      returnAnimDuration === 0 &&
+      !isDraggingNeedle &&
+      dragPreviewTime === null &&
+      dragArmAngle === null &&
+      tonearmState === 'playing'
+    );
+  }
+
+  function paintFrame({ rebuildLayers = true }: { rebuildLayers?: boolean } = {}) {
+    if (!ctx || drawW === 0 || drawH === 0) return;
+
+    const W = drawW;
+    const H = drawH;
+    const turntable = getTurntableGeometry(W, H);
+    const recordOffset = getRecordCenterOffsetPx(turntable.discRadius);
+
+    if (rebuildLayers) {
+      ensureRenderLayers();
+    }
+
+    ctx.clearRect(0, 0, W, H);
+    if (machineLayer) {
+      ctx.drawImage(machineLayer, 0, 0, W, H);
+    } else {
+      drawMachineSurface(W, H);
+    }
+
+    if (platterShadowLayer) {
+      ctx.drawImage(platterShadowLayer, 0, 0, W, H);
+    } else {
+      drawPlatterShadow(W, H);
+    }
+
+    if (platterLayer) {
+      ctx.save();
+      ctx.translate(turntable.cx, turntable.cy);
+      ctx.rotate(platAngle);
+      ctx.drawImage(platterLayer, -turntable.cx, -turntable.cy, W, H);
+      ctx.restore();
+    } else {
+      drawPlatter(W, H);
+    }
+
+    if (platterHighlightsLayer) {
+      ctx.drawImage(platterHighlightsLayer, 0, 0, W, H);
+    } else {
+      drawPlatterStaticHighlights(W, H);
+    }
+    if (discShadowLayer) {
+      ctx.save();
+      ctx.translate(recordOffset.x, recordOffset.y);
+      ctx.drawImage(discShadowLayer, 0, 0, W, H);
+      ctx.restore();
+    } else {
+      drawDiscShadow(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y, turntable.discRadius);
+    }
+
+    if (discBaseLayer) {
+      ctx.save();
+      ctx.translate(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y);
+      ctx.rotate(platAngle);
+      ctx.drawImage(discBaseLayer, -turntable.cx, -turntable.cy, W, H);
+      ctx.restore();
+    } else {
+      drawDisc(W, H, { includeLighting: false });
+      if (side) drawTrackMarkers(W, H);
+    }
+
+    if (discLightingLayer) {
+      ctx.save();
+      ctx.translate(recordOffset.x, recordOffset.y);
+      ctx.drawImage(discLightingLayer, 0, 0, W, H);
+      ctx.restore();
+    } else {
+      drawDiscLightingLayer(W, H);
+    }
+
+    if (spindleLayer) {
+      ctx.drawImage(spindleLayer, 0, 0, W, H);
+    } else {
+      drawSpindle(W, H);
+    }
+
+    drawTonearm(W, H);
   }
 
   function draw(timestamp: number) {
     if (!ctx || drawW === 0) {
       // 布局尺寸首帧有可能还是 0；如果这里直接 return，整条 rAF 渲染循环会永久中断。
       scheduleCanvasSync();
+      animationId = requestAnimationFrame(draw);
+      return;
+    }
+
+    if (
+      shouldThrottlePlaybackFrame() &&
+      lastPaintTimestamp !== 0 &&
+      timestamp - lastPaintTimestamp < PLAYBACK_FRAME_INTERVAL_MS
+    ) {
       animationId = requestAnimationFrame(draw);
       return;
     }
@@ -551,60 +763,14 @@
       }
     }
 
-    const W = drawW;
-    const H = drawH;
-    const turntable = getTurntableGeometry(W, H);
-    const recordOffset = getRecordCenterOffsetPx(turntable.discRadius);
+    paintFrame();
+    lastPaintTimestamp = timestamp;
 
-    ensureRenderLayers();
-
-    ctx.clearRect(0, 0, W, H);
-    if (machineLayer) {
-      ctx.drawImage(machineLayer, 0, 0, W, H);
+    if (isAnimating()) {
+      animationId = requestAnimationFrame(draw);
     } else {
-      drawMachineSurface(W, H);
+      animationId = null;
     }
-
-    drawPlatterShadow(W, H);
-
-    if (platterLayer) {
-      ctx.save();
-      ctx.translate(turntable.cx, turntable.cy);
-      ctx.rotate(platAngle);
-      ctx.drawImage(platterLayer, -turntable.cx, -turntable.cy, W, H);
-      ctx.restore();
-    } else {
-      drawPlatter(W, H);
-    }
-
-    drawPlatterStaticHighlights(W, H);
-    drawDiscShadow(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y, turntable.discRadius);
-
-    if (discBaseLayer) {
-      ctx.save();
-      ctx.translate(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y);
-      ctx.rotate(platAngle);
-      ctx.drawImage(discBaseLayer, -turntable.cx, -turntable.cy, W, H);
-      ctx.restore();
-    } else {
-      drawDisc(W, H, { includeLighting: false });
-      if (side) drawTrackMarkers(W, H);
-    }
-
-    if (discLightingLayer) {
-      ctx.save();
-      ctx.translate(recordOffset.x, recordOffset.y);
-      ctx.drawImage(discLightingLayer, 0, 0, W, H);
-      ctx.restore();
-    } else {
-      drawDiscLightingLayer(W, H);
-    }
-
-    drawSpindle(W, H);
-
-    drawTonearm(W, H);
-
-    animationId = requestAnimationFrame(draw);
   }
 
   function drawMachineSurface(W: number, H: number) {
@@ -1953,6 +2119,7 @@
       if (time !== null) {
         onSeek(time);
       }
+      requestDraw();
       return;
     }
 
@@ -1962,6 +2129,7 @@
     dragPreviewTime = time;
     animatedArmAngle = computeArmAngle(sideTimeToRadius(time, side.totalDuration));
     onSeek(time);
+    requestDraw();
   }
 
   function handlePointerDown(e: PointerEvent) {
@@ -1978,6 +2146,7 @@
     canvas.setPointerCapture(e.pointerId);
     onNeedleDragStart();
     updateDraggedNeedle(e);
+    requestDraw();
     e.preventDefault();
   }
 
@@ -2013,6 +2182,7 @@
     if (shouldCommitDrop) {
       onNeedleDrop(finalTime);
     }
+    requestDraw();
   }
 
   function loadCoverImage(src: string | undefined) {
@@ -2034,7 +2204,7 @@
   }
 
   onMount(() => {
-    ctx = canvas.getContext('2d')!;
+    ctx = canvas.getContext('2d', { alpha: false })!;
 
     syncCanvasSize();
     scheduleCanvasSync();
@@ -2043,7 +2213,7 @@
     resizeObserver.observe(wrapElement);
     window.addEventListener('resize', scheduleCanvasSync);
 
-    animationId = requestAnimationFrame(draw);
+    requestDraw();
   });
 
   let discLayerCacheKey = '';
@@ -2266,26 +2436,20 @@
   .spectrum-cell.lit:nth-child(-n + 3) {
     background: #9cff73;
     border-color: rgba(210, 255, 194, 0.3);
-    box-shadow:
-      0 0 6px rgba(156, 255, 115, 0.35),
-      0 0 12px rgba(156, 255, 115, 0.12);
+    box-shadow: 0 0 4px rgba(156, 255, 115, 0.3);
   }
 
   .spectrum-cell.lit:nth-child(4),
   .spectrum-cell.lit:nth-child(5) {
     background: #ffb347;
     border-color: rgba(255, 222, 170, 0.3);
-    box-shadow:
-      0 0 6px rgba(255, 179, 71, 0.38),
-      0 0 12px rgba(255, 179, 71, 0.12);
+    box-shadow: 0 0 4px rgba(255, 179, 71, 0.3);
   }
 
   .spectrum-cell.lit:nth-child(6) {
     background: #ff6f3c;
     border-color: rgba(255, 201, 182, 0.34);
-    box-shadow:
-      0 0 7px rgba(255, 111, 60, 0.42),
-      0 0 14px rgba(255, 111, 60, 0.14);
+    box-shadow: 0 0 5px rgba(255, 111, 60, 0.35);
   }
 
   .art-btn {
