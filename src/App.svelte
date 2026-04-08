@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import Turntable from './lib/turntable/Turntable.svelte';
+  import { onDestroy, onMount } from "svelte";
+  import Turntable from "./lib/turntable/Turntable.svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
     isDesktopRuntime,
     pickDesktopAudioFiles,
     pickDesktopAudioFolder,
-  } from './lib/audio/importAudio';
+  } from "./lib/audio/importAudio";
   import {
     appendPreparedImportToAlbum,
     countAlbumTracks,
@@ -16,10 +17,20 @@
     moveTrackWithinAlbum,
     removeTrackFromAlbum,
     renameLibraryAlbum,
-  } from './lib/library/model';
-  import { deleteLibraryAlbum, loadLibrary, saveLibraryAlbum } from './lib/library/persistence';
-  import { VinylEngine } from './lib/audio/vinylEngine';
-  import type { Album, DiscArtworkMode, DiscSide, LibraryAlbum, TonearmState } from './lib/types';
+  } from "./lib/library/model";
+  import {
+    deleteLibraryAlbum,
+    loadLibrary,
+    saveLibraryAlbum,
+  } from "./lib/library/persistence";
+  import { VinylEngine } from "./lib/audio/vinylEngine";
+  import type {
+    Album,
+    DiscArtworkMode,
+    DiscSide,
+    LibraryAlbum,
+    TonearmState,
+  } from "./lib/types";
 
   let libraryAlbums: LibraryAlbum[] = [];
   let selectedAlbumId: string | null = null;
@@ -31,28 +42,35 @@
   let isPlatterSpinning = false;
   let isLoading = false;
   let isSavingLibrary = false;
-  let loadError = '';
-  let tonearmState: TonearmState = 'parked';
-  let discArtworkMode: DiscArtworkMode = 'centered';
+  let loadError = "";
+  let tonearmState: TonearmState = "parked";
+  let discArtworkMode: DiscArtworkMode = "centered";
   let startSequenceToken = 0;
   let manualSpinupStartedAt: number | null = null;
-  let albumTitleDraft = '';
+  let albumTitleDraft = "";
   let titleDraftAlbumId: string | null = null;
   let isEditorOpen = false;
   let libraryPanelVisible = true;
 
   const isDesktopApp = isDesktopRuntime();
 
+  function onTitlebarMousedown(e: MouseEvent) {
+    if (e.buttons === 1) {
+      getCurrentWindow().startDragging();
+    }
+  }
+
   const PLATTER_SPINUP_MS = 2300;
   const TONEARM_CUE_MS = 1500;
   const TONEARM_SETTLE_PAUSE_MS = 110;
   const TONEARM_DROP_MS = 700;
 
-  $: selectedAlbum = libraryAlbums.find((album) => album.id === selectedAlbumId) ?? null;
+  $: selectedAlbum =
+    libraryAlbums.find((album) => album.id === selectedAlbumId) ?? null;
   $: currentSide = playbackAlbum?.sides[currentSideIndex] ?? null;
 
   $: if ((selectedAlbum?.id ?? null) !== titleDraftAlbumId) {
-    albumTitleDraft = selectedAlbum?.title ?? '';
+    albumTitleDraft = selectedAlbum?.title ?? "";
     titleDraftAlbumId = selectedAlbum?.id ?? null;
   }
 
@@ -62,13 +80,18 @@
 
   function sortAlbums(albums: LibraryAlbum[]): LibraryAlbum[] {
     return [...albums].sort((left, right) => {
-      if (right.updatedAt !== left.updatedAt) return right.updatedAt - left.updatedAt;
-      return left.title.localeCompare(right.title, undefined, { sensitivity: 'base' });
+      if (right.updatedAt !== left.updatedAt)
+        return right.updatedAt - left.updatedAt;
+      return left.title.localeCompare(right.title, undefined, {
+        sensitivity: "base",
+      });
     });
   }
 
   function replaceAlbum(updatedAlbum: LibraryAlbum) {
-    const otherAlbums = libraryAlbums.filter((album) => album.id !== updatedAlbum.id);
+    const otherAlbums = libraryAlbums.filter(
+      (album) => album.id !== updatedAlbum.id,
+    );
     libraryAlbums = sortAlbums([updatedAlbum, ...otherAlbums]);
     selectedAlbumId = updatedAlbum.id;
   }
@@ -86,7 +109,7 @@
     currentTime = 0;
     isPlaying = false;
     isPlatterSpinning = false;
-    tonearmState = 'parked';
+    tonearmState = "parked";
     manualSpinupStartedAt = null;
   }
 
@@ -99,13 +122,15 @@
       cancelStartupSequence();
       isPlaying = false;
       isPlatterSpinning = false;
-      tonearmState = 'parked';
+      tonearmState = "parked";
       currentTime = currentSide?.totalDuration ?? 0;
       manualSpinupStartedAt = null;
     };
   }
 
-  async function syncSelectedAlbumToPlayer(albumId: string | null = selectedAlbumId) {
+  async function syncSelectedAlbumToPlayer(
+    albumId: string | null = selectedAlbumId,
+  ) {
     const album = getAlbumById(albumId);
 
     resetPlaybackState();
@@ -124,14 +149,14 @@
     if (!isDesktopApp) return;
 
     isLoading = true;
-    loadError = '';
+    loadError = "";
 
     try {
       libraryAlbums = sortAlbums(await loadLibrary());
       selectedAlbumId = libraryAlbums[0]?.id ?? null;
       await syncSelectedAlbumToPlayer(selectedAlbumId);
     } catch (err) {
-      loadError = '加载曲库失败：' + String(err);
+      loadError = "加载曲库失败：" + String(err);
       console.error(err);
     } finally {
       isLoading = false;
@@ -140,38 +165,44 @@
 
   async function persistAlbum(updatedAlbum: LibraryAlbum) {
     isSavingLibrary = true;
-    loadError = '';
+    loadError = "";
 
     try {
       const savedAlbum = await saveLibraryAlbum(updatedAlbum);
       replaceAlbum(savedAlbum);
       await syncSelectedAlbumToPlayer(savedAlbum.id);
     } catch (err) {
-      loadError = '保存失败：' + String(err);
+      loadError = "保存失败：" + String(err);
       console.error(err);
     } finally {
       isSavingLibrary = false;
     }
   }
 
-  async function importAlbum(kind: 'files' | 'folder', target: 'new' | 'current') {
+  async function importAlbum(
+    kind: "files" | "folder",
+    target: "new" | "current",
+  ) {
     isLoading = true;
-    loadError = '';
+    loadError = "";
 
     try {
-      const prepared = kind === 'files'
-        ? await pickDesktopAudioFiles()
-        : await pickDesktopAudioFolder();
+      const prepared =
+        kind === "files"
+          ? await pickDesktopAudioFiles()
+          : await pickDesktopAudioFolder();
 
       if (!prepared) return;
 
-      if (target === 'new' || !selectedAlbum) {
+      if (target === "new" || !selectedAlbum) {
         await persistAlbum(createLibraryAlbumFromPreparedImport(prepared));
       } else {
-        await persistAlbum(appendPreparedImportToAlbum(selectedAlbum, prepared));
+        await persistAlbum(
+          appendPreparedImportToAlbum(selectedAlbum, prepared),
+        );
       }
     } catch (err) {
-      loadError = '导入失败：' + String(err);
+      loadError = "导入失败：" + String(err);
       console.error(err);
     } finally {
       isLoading = false;
@@ -196,14 +227,22 @@
     await syncSelectedAlbumToPlayer(albumId);
   }
 
-  async function moveTrack(sideIndex: number, trackIndex: number, direction: 'up' | 'down' | 'left' | 'right') {
+  async function moveTrack(
+    sideIndex: number,
+    trackIndex: number,
+    direction: "up" | "down" | "left" | "right",
+  ) {
     if (!selectedAlbum) return;
-    await persistAlbum(moveTrackWithinAlbum(selectedAlbum, sideIndex, trackIndex, direction));
+    await persistAlbum(
+      moveTrackWithinAlbum(selectedAlbum, sideIndex, trackIndex, direction),
+    );
   }
 
   async function removeTrack(sideIndex: number, trackIndex: number) {
     if (!selectedAlbum) return;
-    await persistAlbum(removeTrackFromAlbum(selectedAlbum, sideIndex, trackIndex));
+    await persistAlbum(
+      removeTrackFromAlbum(selectedAlbum, sideIndex, trackIndex),
+    );
   }
 
   async function deleteCurrentAlbum() {
@@ -211,17 +250,19 @@
     if (!window.confirm(`删除专辑《${selectedAlbum.title}》？`)) return;
 
     isSavingLibrary = true;
-    loadError = '';
+    loadError = "";
 
     try {
       const removedAlbumId = selectedAlbum.id;
       await deleteLibraryAlbum(removedAlbumId);
-      libraryAlbums = libraryAlbums.filter((album) => album.id !== removedAlbumId);
+      libraryAlbums = libraryAlbums.filter(
+        (album) => album.id !== removedAlbumId,
+      );
       selectedAlbumId = libraryAlbums[0]?.id ?? null;
       isEditorOpen = false;
       await syncSelectedAlbumToPlayer(selectedAlbumId);
     } catch (err) {
-      loadError = '删除失败：' + String(err);
+      loadError = "删除失败：" + String(err);
       console.error(err);
     } finally {
       isSavingLibrary = false;
@@ -248,10 +289,14 @@
   function formatTime(seconds: number): string {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
+    return `${m}:${s.toString().padStart(2, "0")}`;
   }
 
-  function isCurrentTrack(sideRef: DiscSide | null, trackIndex: number, time: number): boolean {
+  function isCurrentTrack(
+    sideRef: DiscSide | null,
+    trackIndex: number,
+    time: number,
+  ): boolean {
     if (!sideRef || !isPlaying) return false;
     let accumulated = 0;
     for (let i = 0; i < trackIndex; i++) {
@@ -279,7 +324,7 @@
     engine.stopLeadInNoise();
     isPlaying = false;
     isPlatterSpinning = false;
-    tonearmState = 'parked';
+    tonearmState = "parked";
     clearManualCueState();
   }
 
@@ -288,21 +333,21 @@
 
     const token = ++startSequenceToken;
     clearManualCueState();
-    tonearmState = 'parked';
+    tonearmState = "parked";
     isPlatterSpinning = true;
     await engine.startLeadInNoise();
 
     await wait(PLATTER_SPINUP_MS);
     if (token !== startSequenceToken) return;
 
-    tonearmState = 'cueing';
+    tonearmState = "cueing";
     await wait(TONEARM_CUE_MS);
     if (token !== startSequenceToken) return;
 
     await wait(TONEARM_SETTLE_PAUSE_MS);
     if (token !== startSequenceToken) return;
 
-    tonearmState = 'dropping';
+    tonearmState = "dropping";
     await wait(TONEARM_DROP_MS);
     if (token !== startSequenceToken) return;
 
@@ -313,16 +358,17 @@
     }
 
     isPlaying = true;
-    tonearmState = 'playing';
+    tonearmState = "playing";
   }
 
   async function beginManualCueSpinup() {
     if (!engine || !currentSide) return;
-    if (isPlaying || tonearmState === 'cueing' || tonearmState === 'dropping') return;
+    if (isPlaying || tonearmState === "cueing" || tonearmState === "dropping")
+      return;
     if (manualSpinupStartedAt !== null && isPlatterSpinning) return;
 
     cancelStartupSequence();
-    tonearmState = 'holding';
+    tonearmState = "holding";
 
     if (!isPlatterSpinning) {
       isPlatterSpinning = true;
@@ -339,7 +385,7 @@
 
     const token = ++startSequenceToken;
     currentTime = timeInSide;
-    tonearmState = 'holding';
+    tonearmState = "holding";
 
     if (!isPlatterSpinning) {
       isPlatterSpinning = true;
@@ -352,7 +398,10 @@
       manualSpinupStartedAt = performance.now() - PLATTER_SPINUP_MS;
     }
 
-    const remainingSpinupMs = Math.max(0, PLATTER_SPINUP_MS - (performance.now() - manualSpinupStartedAt));
+    const remainingSpinupMs = Math.max(
+      0,
+      PLATTER_SPINUP_MS - (performance.now() - manualSpinupStartedAt),
+    );
     if (remainingSpinupMs > 0) {
       await wait(remainingSpinupMs);
       if (token !== startSequenceToken) return;
@@ -361,7 +410,7 @@
     await wait(TONEARM_SETTLE_PAUSE_MS);
     if (token !== startSequenceToken) return;
 
-    tonearmState = 'dropping';
+    tonearmState = "dropping";
     await wait(TONEARM_DROP_MS);
     if (token !== startSequenceToken) return;
 
@@ -373,19 +422,24 @@
 
     clearManualCueState();
     isPlaying = true;
-    tonearmState = 'playing';
+    tonearmState = "playing";
   }
 
   async function togglePlay() {
     if (!engine || !currentSide) return;
 
-    if (isPlaying || isPlatterSpinning || tonearmState === 'cueing' || tonearmState === 'dropping') {
+    if (
+      isPlaying ||
+      isPlatterSpinning ||
+      tonearmState === "cueing" ||
+      tonearmState === "dropping"
+    ) {
       cancelStartupSequence();
       engine.pause();
       engine.stopLeadInNoise();
       isPlaying = false;
       isPlatterSpinning = false;
-      tonearmState = 'parked';
+      tonearmState = "parked";
       clearManualCueState();
     } else {
       await beginPlaybackSequence();
@@ -413,7 +467,7 @@
 
     engine.stopLeadInNoise();
     isPlatterSpinning = false;
-    tonearmState = 'parked';
+    tonearmState = "parked";
     clearManualCueState();
 
     currentSideIndex = index;
@@ -433,7 +487,10 @@
   });
 </script>
 
-<main>
+<main class:desktop-overlay-shell={isDesktopApp}>
+  {#if isDesktopApp}
+    <div class="titlebar-drag-region" on:mousedown={onTitlebarMousedown}></div>
+  {/if}
   <div class="studio" class:collapsed-layout={!libraryPanelVisible}>
     <aside class="library-panel" class:collapsed={!libraryPanelVisible}>
       {#if libraryPanelVisible}
@@ -446,15 +503,28 @@
 
             <div class="panel-toolbar" aria-label="导入新专辑与曲库控制">
               {#if isDesktopApp}
-                <button class="mini-btn" type="button" on:click={() => void importAlbum('files', 'new')}>
+                <button
+                  class="mini-btn"
+                  type="button"
+                  on:click={() => void importAlbum("files", "new")}
+                >
                   导入文件
                 </button>
-                <button class="mini-btn" type="button" on:click={() => void importAlbum('folder', 'new')}>
+                <button
+                  class="mini-btn"
+                  type="button"
+                  on:click={() => void importAlbum("folder", "new")}
+                >
                   导入文件夹
                 </button>
               {/if}
 
-              <button class="toggle-library-btn" type="button" on:click={toggleLibraryPanel} aria-label="切换库面板">
+              <button
+                class="toggle-library-btn"
+                type="button"
+                on:click={toggleLibraryPanel}
+                aria-label="切换库面板"
+              >
                 隐藏库
               </button>
             </div>
@@ -469,18 +539,26 @@
               <div
                 class="selected-album-card"
                 class:has-cover={Boolean(selectedAlbum.coverUrl)}
-                style={selectedAlbum.coverUrl ? `--selected-album-art: url("${selectedAlbum.coverUrl}")` : undefined}
+                style={selectedAlbum.coverUrl
+                  ? `--selected-album-art: url("${selectedAlbum.coverUrl}")`
+                  : undefined}
               >
                 <div class="selected-album-shell">
                   <div class="selected-album-copy">
                     <div class="section-label">当前专辑</div>
                     <div class="selected-album-headline">
-                      <span class="selected-album-title">{selectedAlbum.title}</span>
+                      <span class="selected-album-title"
+                        >{selectedAlbum.title}</span
+                      >
                       <span class="selected-album-badge">当前专辑</span>
                     </div>
-                    <span class="selected-album-artist">{selectedAlbum.artist || '未署名艺人'}</span>
+                    <span class="selected-album-artist"
+                      >{selectedAlbum.artist || "未署名艺人"}</span
+                    >
                     <div class="selected-album-stats">
-                      <span>{Math.ceil(selectedAlbum.sides.length / 2)} 张碟</span>
+                      <span
+                        >{Math.ceil(selectedAlbum.sides.length / 2)} 张碟</span
+                      >
                       <span>{selectedAlbum.sides.length} 面</span>
                       <span>{countAlbumTracks(selectedAlbum)} 首</span>
                       <span>{formatTime(getAlbumDuration(selectedAlbum))}</span>
@@ -489,7 +567,11 @@
                 </div>
 
                 <div class="selected-album-actions">
-                  <button class="primary-btn" type="button" on:click={openEditor}>
+                  <button
+                    class="primary-btn"
+                    type="button"
+                    on:click={openEditor}
+                  >
                     编辑专辑
                   </button>
                 </div>
@@ -499,10 +581,14 @@
                     <div class="sidebar-side-head">
                       <div class="sidebar-side-kicker">
                         <span class="section-label">当前盘面</span>
-                        <span class="sidebar-side-badge">Side {currentSide.label}</span>
+                        <span class="sidebar-side-badge"
+                          >Side {currentSide.label}</span
+                        >
                       </div>
                       <span class="selected-album-meta">
-                        {currentSide.tracks.length} 首曲目 · 总时长 {formatTime(currentSide.totalDuration)}
+                        {currentSide.tracks.length} 首曲目 · 总时长 {formatTime(
+                          currentSide.totalDuration,
+                        )}
                       </span>
                     </div>
 
@@ -526,10 +612,21 @@
                         <span>Time</span>
                       </div>
                       {#each currentSide.tracks as track, index}
-                        <div class="sidebar-track" class:playing={isCurrentTrack(currentSide, index, currentTime)}>
-                          <span class="sidebar-track-num">{String(index + 1).padStart(2, '0')}</span>
+                        <div
+                          class="sidebar-track"
+                          class:playing={isCurrentTrack(
+                            currentSide,
+                            index,
+                            currentTime,
+                          )}
+                        >
+                          <span class="sidebar-track-num"
+                            >{String(index + 1).padStart(2, "0")}</span
+                          >
                           <span class="sidebar-track-title">{track.title}</span>
-                          <span class="sidebar-track-duration">{formatTime(track.duration)}</span>
+                          <span class="sidebar-track-duration"
+                            >{formatTime(track.duration)}</span
+                          >
                         </div>
                       {/each}
                     </div>
@@ -549,7 +646,9 @@
               <span class="catalog-count">{libraryAlbums.length} 张收藏</span>
             </div>
             {#if libraryAlbums.length === 0}
-              <p class="empty-state">还没有专辑，先从本地音频文件或文件夹导入。</p>
+              <p class="empty-state">
+                还没有专辑，先从本地音频文件或文件夹导入。
+              </p>
             {:else}
               <div class="album-list">
                 {#each libraryAlbums as item, index}
@@ -559,11 +658,14 @@
                     on:click={() => void selectAlbumById(item.id)}
                     type="button"
                   >
-                    <span class="album-card-index">{String(index + 1).padStart(2, '0')}</span>
+                    <span class="album-card-index"
+                      >{String(index + 1).padStart(2, "0")}</span
+                    >
                     <span class="album-card-copy">
                       <span class="album-card-title">{item.title}</span>
                       <span class="album-card-meta">
-                        {Math.ceil(item.sides.length / 2)} 张碟 · {item.sides.length} 面 · {countAlbumTracks(item)} 首
+                        {Math.ceil(item.sides.length / 2)} 张碟 · {item.sides
+                          .length} 面 · {countAlbumTracks(item)} 首
                       </span>
                     </span>
                     {#if item.id === selectedAlbumId}
@@ -576,7 +678,12 @@
           </div>
         </div>
       {:else}
-        <button class="toggle-library-btn collapsed-toggle-btn" type="button" on:click={toggleLibraryPanel} aria-label="切换库面板">
+        <button
+          class="toggle-library-btn collapsed-toggle-btn"
+          type="button"
+          on:click={toggleLibraryPanel}
+          aria-label="切换库面板"
+        >
           显示库
         </button>
       {/if}
@@ -588,12 +695,19 @@
               <div class="section-label">专辑编辑</div>
               <div class="drawer-title">{selectedAlbum.title}</div>
               <div class="arranger-meta">
-                {Math.ceil(selectedAlbum.sides.length / 2)} 张碟 · {selectedAlbum.sides.length} 面 ·
-                {countAlbumTracks(selectedAlbum)} 首 · {formatTime(getAlbumDuration(selectedAlbum))}
+                {Math.ceil(selectedAlbum.sides.length / 2)} 张碟 · {selectedAlbum
+                  .sides.length} 面 ·
+                {countAlbumTracks(selectedAlbum)} 首 · {formatTime(
+                  getAlbumDuration(selectedAlbum),
+                )}
               </div>
             </div>
 
-            <button class="ghost-btn close-btn" type="button" on:click={closeEditor}>
+            <button
+              class="ghost-btn close-btn"
+              type="button"
+              on:click={closeEditor}
+            >
               收起
             </button>
           </div>
@@ -605,20 +719,36 @@
               placeholder="专辑名称"
               on:blur={() => void saveCurrentAlbumTitle()}
             />
-            <button class="save-btn" type="button" on:click={() => void saveCurrentAlbumTitle()}>
+            <button
+              class="save-btn"
+              type="button"
+              on:click={() => void saveCurrentAlbumTitle()}
+            >
               保存标题
             </button>
           </div>
 
           {#if isDesktopApp}
             <div class="drawer-actions">
-              <button class="ghost-btn" type="button" on:click={() => void importAlbum('files', 'current')}>
+              <button
+                class="ghost-btn"
+                type="button"
+                on:click={() => void importAlbum("files", "current")}
+              >
                 追加文件到当前专辑
               </button>
-              <button class="ghost-btn" type="button" on:click={() => void importAlbum('folder', 'current')}>
+              <button
+                class="ghost-btn"
+                type="button"
+                on:click={() => void importAlbum("folder", "current")}
+              >
                 追加文件夹到当前专辑
               </button>
-              <button class="danger-btn" type="button" on:click={() => void deleteCurrentAlbum()}>
+              <button
+                class="danger-btn"
+                type="button"
+                on:click={() => void deleteCurrentAlbum()}
+              >
                 删除专辑
               </button>
             </div>
@@ -631,9 +761,13 @@
               {#each selectedAlbum.sides as sideTracks, sideIndex}
                 <section class="side-editor">
                   <div class="side-editor-head">
-                    <span class="side-editor-title">Side {getSideLabel(sideIndex)}</span>
+                    <span class="side-editor-title"
+                      >Side {getSideLabel(sideIndex)}</span
+                    >
                     <span class="side-editor-meta">
-                      {sideTracks.length} 首 · {formatTime(getSideDuration(sideTracks))}
+                      {sideTracks.length} 首 · {formatTime(
+                        getSideDuration(sideTracks),
+                      )}
                     </span>
                   </div>
 
@@ -642,27 +776,47 @@
                       <div class="editor-track">
                         <div class="editor-track-body">
                           <span class="editor-track-title">{track.title}</span>
-                          <span class="editor-track-path">{track.sourceDisplayPath}</span>
+                          <span class="editor-track-path"
+                            >{track.sourceDisplayPath}</span
+                          >
                         </div>
 
                         <div class="editor-track-tools">
-                          <button type="button" on:click={() => void moveTrack(sideIndex, trackIndex, 'up')}>
+                          <button
+                            type="button"
+                            on:click={() =>
+                              void moveTrack(sideIndex, trackIndex, "up")}
+                          >
                             ↑
                           </button>
-                          <button type="button" on:click={() => void moveTrack(sideIndex, trackIndex, 'down')}>
+                          <button
+                            type="button"
+                            on:click={() =>
+                              void moveTrack(sideIndex, trackIndex, "down")}
+                          >
                             ↓
                           </button>
                           <button
                             type="button"
                             disabled={sideIndex === 0}
-                            on:click={() => void moveTrack(sideIndex, trackIndex, 'left')}
+                            on:click={() =>
+                              void moveTrack(sideIndex, trackIndex, "left")}
                           >
                             ←
                           </button>
-                          <button type="button" on:click={() => void moveTrack(sideIndex, trackIndex, 'right')}>
+                          <button
+                            type="button"
+                            on:click={() =>
+                              void moveTrack(sideIndex, trackIndex, "right")}
+                          >
                             →
                           </button>
-                          <button type="button" class="danger-icon" on:click={() => void removeTrack(sideIndex, trackIndex)}>
+                          <button
+                            type="button"
+                            class="danger-icon"
+                            on:click={() =>
+                              void removeTrack(sideIndex, trackIndex)}
+                          >
                             ×
                           </button>
                         </div>
@@ -705,10 +859,14 @@
           {tonearmState}
           coverUrl={playbackAlbum?.coverUrl}
           artworkMode={discArtworkMode}
-          onArtworkModeChange={(mode) => { discArtworkMode = mode; }}
+          onArtworkModeChange={(mode) => {
+            discArtworkMode = mode;
+          }}
           onSeek={handleSeek}
           onTogglePlay={togglePlay}
-          onNeedleDragStart={() => { void beginManualCueSpinup(); }}
+          onNeedleDragStart={() => {
+            void beginManualCueSpinup();
+          }}
           onNeedleDrop={(timeInSide) => {
             if (isPlaying) return;
             if (timeInSide === null) {
@@ -731,11 +889,14 @@
   }
 
   :global(body) {
-    background:
-      radial-gradient(circle at top left, rgba(255, 245, 221, 0.95), transparent 36%),
+    background: radial-gradient(
+        circle at top left,
+        rgba(255, 245, 221, 0.95),
+        transparent 36%
+      ),
       linear-gradient(135deg, #e9dcc5 0%, #d8c4a1 45%, #c4ab82 100%);
     color: #2e1e0a;
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
     overflow: hidden;
   }
 
@@ -743,6 +904,29 @@
     width: 100vw;
     height: 100vh;
     height: 100dvh;
+  }
+
+  main.desktop-overlay-shell .library-panel {
+    padding-top: 52px;
+  }
+
+  main.desktop-overlay-shell .turntable-panel {
+    padding: 44px 0 0;
+    gap: 0;
+    border-radius: 0 10px 10px 0;
+  }
+
+  main.desktop-overlay-shell .turntable-head {
+    padding: 0 18px 10px;
+  }
+
+  .titlebar-drag-region {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 52px;
+    z-index: 9999;
   }
 
   .studio {
@@ -762,8 +946,11 @@
     flex-direction: column;
     padding: 18px 16px 16px 12px;
     border-right: 1px solid rgba(110, 73, 30, 0.2);
-    background:
-      linear-gradient(180deg, rgba(253, 248, 238, 0.6), rgba(216, 192, 153, 0.22)),
+    background: linear-gradient(
+        180deg,
+        rgba(253, 248, 238, 0.6),
+        rgba(216, 192, 153, 0.22)
+      ),
       linear-gradient(145deg, rgba(121, 84, 43, 0.3), rgba(81, 51, 24, 0.08)),
       linear-gradient(180deg, #cfb189 0%, #b38e64 100%);
     backdrop-filter: blur(12px);
@@ -774,7 +961,7 @@
       inset 0 1px 0 rgba(255, 247, 233, 0.32),
       inset -1px 0 0 rgba(84, 54, 22, 0.14),
       18px 0 40px rgba(83, 53, 22, 0.14);
-    font-family: Georgia, 'Times New Roman', serif;
+    font-family: Georgia, "Times New Roman", serif;
   }
   .library-panel.collapsed .library-shell {
     display: none;
@@ -819,8 +1006,11 @@
     z-index: 2;
     padding: 18px 14px 16px 12px;
     overflow-y: auto;
-    background:
-      linear-gradient(180deg, rgba(255, 251, 243, 0.96), rgba(235, 220, 194, 0.98)),
+    background: linear-gradient(
+        180deg,
+        rgba(255, 251, 243, 0.96),
+        rgba(235, 220, 194, 0.98)
+      ),
       rgba(229, 213, 184, 0.99);
     box-shadow: 18px 0 36px rgba(84, 52, 18, 0.16);
     scrollbar-width: thin;
@@ -839,14 +1029,22 @@
 
   .library-shell::-webkit-scrollbar-thumb,
   .editor-drawer::-webkit-scrollbar-thumb {
-    background: linear-gradient(180deg, rgba(148, 111, 60, 0.34), rgba(104, 73, 34, 0.42));
+    background: linear-gradient(
+      180deg,
+      rgba(148, 111, 60, 0.34),
+      rgba(104, 73, 34, 0.42)
+    );
     border-radius: 999px;
     border: 1px solid rgba(255, 247, 233, 0.48);
   }
 
   .library-shell::-webkit-scrollbar-thumb:hover,
   .editor-drawer::-webkit-scrollbar-thumb:hover {
-    background: linear-gradient(180deg, rgba(148, 111, 60, 0.46), rgba(104, 73, 34, 0.56));
+    background: linear-gradient(
+      180deg,
+      rgba(148, 111, 60, 0.46),
+      rgba(104, 73, 34, 0.56)
+    );
   }
 
   .panel-head,
@@ -868,8 +1066,12 @@
     gap: 14px;
     padding: 16px 16px 14px;
     border-radius: 24px;
-    background:
-      linear-gradient(180deg, rgba(93, 58, 25, 0.18), rgba(255, 247, 233, 0.2) 24%, rgba(255, 245, 228, 0.78) 100%);
+    background: linear-gradient(
+      180deg,
+      rgba(93, 58, 25, 0.18),
+      rgba(255, 247, 233, 0.2) 24%,
+      rgba(255, 245, 228, 0.78) 100%
+    );
     border: 1px solid rgba(116, 78, 33, 0.16);
     box-shadow:
       inset 0 1px 0 rgba(255, 252, 246, 0.52),
@@ -895,7 +1097,7 @@
     letter-spacing: 0.22em;
     color: #8a6a3c;
     text-transform: uppercase;
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .panel-title,
@@ -954,7 +1156,7 @@
     letter-spacing: 0.16em;
     text-transform: uppercase;
     color: #8d6b3d;
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .mini-btn,
@@ -968,38 +1170,52 @@
     border: 0;
     border-radius: 10px;
     cursor: pointer;
-    transition: transform 0.14s ease, background 0.14s ease, opacity 0.14s ease;
+    transition:
+      transform 0.14s ease,
+      background 0.14s ease,
+      opacity 0.14s ease;
   }
 
   .mini-btn {
     min-height: 30px;
     padding: 7px 12px;
     border: 1px solid rgba(120, 84, 38, 0.18);
-    background: linear-gradient(180deg, rgba(255, 250, 243, 0.96), rgba(244, 229, 202, 0.88));
+    background: linear-gradient(
+      180deg,
+      rgba(255, 250, 243, 0.96),
+      rgba(244, 229, 202, 0.88)
+    );
     color: #5b3a12;
     font-size: calc(10px * var(--app-font-scale));
     letter-spacing: 0.08em;
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.6),
       0 6px 12px rgba(106, 69, 29, 0.08);
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .toggle-library-btn {
     min-height: 30px;
     padding: 7px 12px;
     border: 1px solid rgba(120, 84, 38, 0.18);
-    background: linear-gradient(180deg, rgba(255, 250, 243, 0.96), rgba(244, 229, 202, 0.88));
+    background: linear-gradient(
+      180deg,
+      rgba(255, 250, 243, 0.96),
+      rgba(244, 229, 202, 0.88)
+    );
     color: #5b3a12;
     font-size: calc(10px * var(--app-font-scale));
     letter-spacing: 0.08em;
     border-radius: 10px;
     cursor: pointer;
-    transition: transform 0.14s ease, background 0.14s ease, opacity 0.14s ease;
+    transition:
+      transform 0.14s ease,
+      background 0.14s ease,
+      opacity 0.14s ease;
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.6),
       0 6px 12px rgba(106, 69, 29, 0.08);
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .primary-btn,
@@ -1015,14 +1231,18 @@
     box-shadow:
       inset 0 1px 0 rgba(255, 244, 223, 0.35),
       0 10px 18px rgba(92, 55, 18, 0.16);
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .ghost-btn {
     border: 1px solid rgba(133, 98, 49, 0.16);
-    background: linear-gradient(180deg, rgba(255, 250, 242, 0.92), rgba(245, 232, 208, 0.86));
+    background: linear-gradient(
+      180deg,
+      rgba(255, 250, 242, 0.92),
+      rgba(245, 232, 208, 0.86)
+    );
     color: #553712;
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .mini-btn:disabled,
@@ -1079,8 +1299,11 @@
     gap: 12px;
     padding: 14px 14px 13px;
     border-radius: 18px;
-    background:
-      linear-gradient(180deg, rgba(255, 252, 246, 0.94), rgba(243, 229, 205, 0.9)),
+    background: linear-gradient(
+        180deg,
+        rgba(255, 252, 246, 0.94),
+        rgba(243, 229, 205, 0.9)
+      ),
       rgba(255, 251, 244, 0.62);
     border: 1px solid rgba(133, 98, 49, 0.12);
     color: #4c3210;
@@ -1091,9 +1314,16 @@
   }
 
   .album-card.active {
-    background:
-      linear-gradient(90deg, rgba(146, 105, 50, 0.2), rgba(255, 248, 238, 0.98) 18%),
-      linear-gradient(180deg, rgba(255, 252, 246, 0.98), rgba(241, 226, 198, 0.92));
+    background: linear-gradient(
+        90deg,
+        rgba(146, 105, 50, 0.2),
+        rgba(255, 248, 238, 0.98) 18%
+      ),
+      linear-gradient(
+        180deg,
+        rgba(255, 252, 246, 0.98),
+        rgba(241, 226, 198, 0.92)
+      );
     color: #2f1c04;
     border-color: rgba(133, 98, 49, 0.14);
     box-shadow:
@@ -1108,7 +1338,7 @@
     font-size: calc(9px * var(--app-font-scale));
     letter-spacing: 0.18em;
     color: rgba(108, 73, 31, 0.72);
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .album-card-copy {
@@ -1133,7 +1363,7 @@
     font-size: calc(8px * var(--app-font-scale));
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .album-card-badge {
@@ -1153,8 +1383,11 @@
   .focus-section {
     padding: 18px 17px 16px;
     border-radius: 28px;
-    background:
-      linear-gradient(180deg, rgba(255, 252, 247, 0.95), rgba(242, 228, 201, 0.92)),
+    background: linear-gradient(
+        180deg,
+        rgba(255, 252, 247, 0.95),
+        rgba(242, 228, 201, 0.92)
+      ),
       rgba(255, 248, 235, 0.7);
     border: 1px solid rgba(133, 98, 49, 0.14);
     box-shadow:
@@ -1166,8 +1399,11 @@
   .catalog-section {
     padding: 16px 15px 14px;
     border-radius: 24px;
-    background:
-      linear-gradient(180deg, rgba(246, 234, 211, 0.92), rgba(231, 210, 176, 0.9)),
+    background: linear-gradient(
+        180deg,
+        rgba(246, 234, 211, 0.92),
+        rgba(231, 210, 176, 0.9)
+      ),
       rgba(239, 224, 197, 0.82);
     border: 1px solid rgba(131, 92, 41, 0.14);
     box-shadow:
@@ -1188,7 +1424,7 @@
     letter-spacing: 0.12em;
     color: rgba(96, 63, 24, 0.76);
     text-transform: uppercase;
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .selected-album-card,
@@ -1216,8 +1452,11 @@
     overflow: hidden;
     padding: 18px 18px 16px;
     border-radius: 24px;
-    background:
-      linear-gradient(180deg, rgba(255, 250, 241, 0.96), rgba(241, 227, 198, 0.92)),
+    background: linear-gradient(
+        180deg,
+        rgba(255, 250, 241, 0.96),
+        rgba(241, 227, 198, 0.92)
+      ),
       rgba(255, 248, 235, 0.82);
     border: 1px solid rgba(133, 98, 49, 0.14);
     box-shadow:
@@ -1228,17 +1467,25 @@
   }
 
   .selected-album-card::after {
-    content: '';
+    content: "";
     position: absolute;
     inset: 0;
     z-index: 1;
-    background:
-      linear-gradient(180deg, rgba(255, 252, 247, 0.92), rgba(248, 240, 224, 0.84) 42%, rgba(239, 223, 194, 0.92)),
-      radial-gradient(circle at top right, rgba(255, 255, 255, 0.5), transparent 34%);
+    background: linear-gradient(
+        180deg,
+        rgba(255, 252, 247, 0.92),
+        rgba(248, 240, 224, 0.84) 42%,
+        rgba(239, 223, 194, 0.92)
+      ),
+      radial-gradient(
+        circle at top right,
+        rgba(255, 255, 255, 0.5),
+        transparent 34%
+      );
   }
 
   .selected-album-card.has-cover::before {
-    content: '';
+    content: "";
     position: absolute;
     inset: -10%;
     z-index: 0;
@@ -1299,7 +1546,7 @@
     font-size: calc(9px * var(--app-font-scale));
     line-height: 1.5;
     color: rgba(96, 63, 24, 0.8);
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .selected-album-stats span {
@@ -1309,12 +1556,12 @@
   }
 
   .selected-album-stats span::before {
-    content: '•';
+    content: "•";
     color: rgba(120, 82, 31, 0.44);
   }
 
   .selected-album-stats span:first-child::before {
-    content: '';
+    content: "";
     display: none;
   }
 
@@ -1330,8 +1577,11 @@
     gap: 12px;
     padding: 14px 14px 12px;
     border-radius: 22px;
-    background:
-      linear-gradient(180deg, rgba(247, 238, 220, 0.98), rgba(237, 220, 191, 0.94));
+    background: linear-gradient(
+      180deg,
+      rgba(247, 238, 220, 0.98),
+      rgba(237, 220, 191, 0.94)
+    );
     border: 1px solid rgba(133, 98, 49, 0.14);
     box-shadow:
       inset 0 1px 0 rgba(255, 251, 244, 0.6),
@@ -1363,7 +1613,7 @@
     font-size: calc(8px * var(--app-font-scale));
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .sidebar-side-picker {
@@ -1386,7 +1636,7 @@
     text-transform: uppercase;
     opacity: 0.72;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.44);
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .side-chip:hover {
@@ -1396,7 +1646,11 @@
   .side-chip.active {
     color: #2f1c04;
     opacity: 1;
-    background: linear-gradient(180deg, rgba(154, 111, 56, 0.18), rgba(255, 249, 239, 0.92));
+    background: linear-gradient(
+      180deg,
+      rgba(154, 111, 56, 0.18),
+      rgba(255, 249, 239, 0.92)
+    );
     border-color: rgba(124, 86, 38, 0.18);
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.54),
@@ -1409,15 +1663,18 @@
     gap: 0;
     padding: 10px 12px 4px;
     border-radius: 16px;
-    background:
-      repeating-linear-gradient(
+    background: repeating-linear-gradient(
         180deg,
         rgba(147, 108, 55, 0.06) 0,
         rgba(147, 108, 55, 0.06) 1px,
         transparent 1px,
         transparent 34px
       ),
-      linear-gradient(180deg, rgba(250, 244, 230, 0.98), rgba(245, 234, 211, 0.94));
+      linear-gradient(
+        180deg,
+        rgba(250, 244, 230, 0.98),
+        rgba(245, 234, 211, 0.94)
+      );
     border: 1px solid rgba(137, 99, 47, 0.12);
     box-shadow:
       inset 0 1px 0 rgba(255, 251, 244, 0.82),
@@ -1434,7 +1691,7 @@
     letter-spacing: 0.16em;
     text-transform: uppercase;
     color: rgba(108, 73, 31, 0.78);
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .sidebar-track {
@@ -1450,7 +1707,12 @@
     padding-inline: 4px;
     margin-inline: -4px;
     border-bottom-color: rgba(94, 63, 24, 0.34);
-    background: linear-gradient(90deg, rgba(156, 114, 58, 0.12), rgba(255, 248, 238, 0.28), rgba(156, 114, 58, 0.06));
+    background: linear-gradient(
+      90deg,
+      rgba(156, 114, 58, 0.12),
+      rgba(255, 248, 238, 0.28),
+      rgba(156, 114, 58, 0.06)
+    );
     border-radius: 8px;
   }
 
@@ -1458,7 +1720,7 @@
   .sidebar-track-duration {
     font-size: calc(9px * var(--app-font-scale));
     color: #8c6d42;
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .sidebar-track-title {
@@ -1504,7 +1766,7 @@
     background: #3d6b53;
     color: #eef8f0;
     font-size: calc(12px * var(--app-font-scale));
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .danger-btn,
@@ -1594,7 +1856,7 @@
     background: rgba(255, 251, 246, 0.9);
     color: #613c12;
     font-size: calc(12px * var(--app-font-scale));
-    font-family: 'Courier New', monospace;
+    font-family: "Courier New", monospace;
   }
 
   .turntable-panel {
@@ -1617,7 +1879,6 @@
     overflow: hidden;
   }
 
-
   @media (max-width: 1180px) {
     .studio {
       grid-template-columns: minmax(302px, 344px) minmax(0, 1fr);
@@ -1636,6 +1897,14 @@
     main {
       height: auto;
       min-height: 100vh;
+    }
+
+    main.desktop-overlay-shell .library-panel {
+      padding-top: 0px;
+    }
+
+    .titlebar-drag-region {
+      height: 44px;
     }
 
     .studio {

@@ -13,10 +13,13 @@ export const GROOVE_OUTER_RADIUS = 0.97; // 第一道刻槽（面开始）
 export const GROOVE_INNER_RADIUS = 0.42; // 最后一道刻槽（面结束）
 export const LABEL_RADIUS = 0.35;        // 中心标签区域
 export const MAX_PLAYABLE_SIDE_DURATION = 23 * 60; // 单面最长 23 分钟
+const MIN_VISUAL_PLAYABLE_SPAN = 0.16; // 短盘面也保留足够明显的视觉行程
 
 export function getPlayableInnerRadius(totalSideDuration: number): number {
   const fill = Math.min(1, Math.max(0, totalSideDuration / MAX_PLAYABLE_SIDE_DURATION));
-  return GROOVE_OUTER_RADIUS - fill * (GROOVE_OUTER_RADIUS - GROOVE_INNER_RADIUS);
+  const physicalSpan = fill * (GROOVE_OUTER_RADIUS - GROOVE_INNER_RADIUS);
+  const visualSpan = Math.max(physicalSpan, MIN_VISUAL_PLAYABLE_SPAN);
+  return Math.max(GROOVE_INNER_RADIUS, GROOVE_OUTER_RADIUS - visualSpan);
 }
 
 /**

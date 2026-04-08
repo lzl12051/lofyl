@@ -26,7 +26,7 @@
   let wrapElement: HTMLDivElement;
   let canvas: HTMLCanvasElement;
   let ctx: CanvasRenderingContext2D;
-  let animationId: number;
+  let animationId: number | null = null;
   let coverImage: HTMLImageElement | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let scheduledSyncId: number | null = null;
@@ -71,7 +71,7 @@
   const RPM = 33.333;
   const RAD_PER_SEC = (RPM / 60) * 2 * Math.PI;
   const PLATTER_SPINUP_MS = 2300;
-  const PLATTER_SPINDOWN_MS = 1500;
+  const PLATTER_SPINDOWN_MS = 5000;
   const TONEARM_CUE_MS = 1500;
   const TONEARM_DROP_MS = 700;
   const CENTER_X_NORM = 0.46;
@@ -286,6 +286,7 @@
   function getMechanicalWobble(radius: number) {
     const t = wobbleTime;
     const strength = 0.35 + platterSpeed * 0.65;
+    const armWobbleStrength = strength * 0.22;
 
     return {
       platterOffsetX:
@@ -302,16 +303,21 @@
         1 + Math.cos(t * 0.54 + 1.7) * 0.0009 * strength,
       armAngle:
         (Math.sin(t * 0.84 + 0.2) * 0.0038 +
-        Math.sin(t * 1.63 + 1.1) * 0.0014) * strength,
+        Math.sin(t * 1.63 + 1.1) * 0.0014) * armWobbleStrength,
       armPivotX:
-        Math.sin(t * 0.62 + 0.9) * radius * 0.001 * strength,
+        Math.sin(t * 0.62 + 0.9) * radius * 0.001 * armWobbleStrength,
       armPivotY:
-        Math.cos(t * 0.7 + 1.4) * radius * 0.0009 * strength,
+        Math.cos(t * 0.7 + 1.4) * radius * 0.0009 * armWobbleStrength,
     };
   }
 
   function draw(timestamp: number) {
-    if (!ctx || drawW === 0) return;
+    if (!ctx || drawW === 0) {
+      // 布局尺寸首帧有可能还是 0；如果这里直接 return，整条 rAF 渲染循环会永久中断。
+      scheduleCanvasSync();
+      animationId = requestAnimationFrame(draw);
+      return;
+    }
 
     const dt = lastTimestamp ? (timestamp - lastTimestamp) / 1000 : 0;
     lastTimestamp = timestamp;
@@ -320,9 +326,9 @@
     // ── 转盘转速动画（spinup/spindown）──────────────────────────
     if (platterSpeedAnimDuration > 0) {
       const pp = Math.min(1, (timestamp - platterSpeedAnimStart) / platterSpeedAnimDuration);
-      // 加速：easeInOut；减速：easeOutQuart（快速衰减后拖尾）
+      // 加速：easeInOut；减速：线性匀减速（物理感真实，5 秒内均匀可见）
       const isSpinup = platterSpeedTo > platterSpeedFrom;
-      const eased = isSpinup ? easeInOutCubic(pp) : easeOutQuart(pp);
+      const eased = isSpinup ? easeInOutCubic(pp) : pp;
       platterSpeed = platterSpeedFrom + (platterSpeedTo - platterSpeedFrom) * eased;
       if (pp >= 1) {
         platterSpeed = platterSpeedTo;
@@ -364,6 +370,8 @@
       }
 
     } else if (tonearmState === 'playing') {
+      // 播放态直接使用当前时间对应的角度，避免插值滞后把唱针视觉上锁在旧位置。
+      animatedArmAngle = targetArmAngle;
       tonearmLiftPx = 0;
       tonearmAngleJolt = 0;
 
@@ -941,7 +949,7 @@
     ctx.arc(0, 0, grooveInnerPx, 0, Math.PI * 2, true);
     ctx.clip('evenodd');
 
-    // 极弱的不对称压纹和擦痕，提供“它在转”的视觉锚点。
+    // 极弱的不对称压纹，给旋转中的盘面一点细微层次。
     const swirl = ctx.createRadialGradient(
       -discRadius * 0.18,
       discRadius * 0.22,
@@ -958,28 +966,16 @@
     ctx.arc(0, 0, grooveOuterPx * 0.98, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.strokeStyle = 'rgba(240,232,208,0.03)';
-    ctx.lineCap = 'round';
-    ctx.lineWidth = discRadius * 0.006;
-    ctx.beginPath();
-    ctx.arc(discRadius * 0.02, -discRadius * 0.02, discRadius * 0.74, -Math.PI * 0.08, Math.PI * 0.16);
-    ctx.stroke();
-
-    ctx.lineWidth = discRadius * 0.004;
-    ctx.beginPath();
-    ctx.arc(-discRadius * 0.04, discRadius * 0.03, discRadius * 0.58, Math.PI * 0.48, Math.PI * 0.82);
-    ctx.stroke();
-
-    ctx.strokeStyle = 'rgba(20,16,12,0.08)';
-    ctx.lineWidth = discRadius * 0.01;
-    ctx.beginPath();
-    ctx.arc(discRadius * 0.08, discRadius * 0.06, discRadius * 0.63, -Math.PI * 0.72, -Math.PI * 0.48);
-    ctx.stroke();
-
     ctx.restore();
   }
 
   function drawDiscLighting(cx: number, cy: number, r: number) {
+    const TAU = Math.PI * 2;
+    const toConicStop = (angle: number) => {
+      const normalized = ((angle % TAU) + TAU) % TAU;
+      return normalized / TAU;
+    };
+
     ctx.save();
     ctx.beginPath();
     ctx.arc(cx, cy, r * 0.995, 0, Math.PI * 2);
@@ -998,65 +994,67 @@
     ctx.fillStyle = rimShade;
     ctx.fill();
 
-    // 黑胶最外圈的光滑高光带，强调盘片本体材质而不是唱盘底座
-    const glossyOuterRing = ctx.createRadialGradient(cx, cy, r * 0.78, cx, cy, r * 1.01);
-    glossyOuterRing.addColorStop(0, 'rgba(255,248,228,0)');
-    glossyOuterRing.addColorStop(0.72, 'rgba(255,248,228,0.016)');
-    glossyOuterRing.addColorStop(0.88, 'rgba(255,248,228,0.052)');
-    glossyOuterRing.addColorStop(0.95, 'rgba(255,248,228,0.02)');
-    glossyOuterRing.addColorStop(1, 'rgba(255,248,228,0)');
-    ctx.beginPath();
-    ctx.arc(cx, cy, r * 0.992, 0, Math.PI * 2);
-    ctx.arc(cx, cy, r * 0.78, 0, Math.PI * 2, true);
-    ctx.fillStyle = glossyOuterRing;
-    ctx.fill('evenodd');
-
-    // 外圈上的柔和掠射反光，强化“抛光边缘”的感觉
-    ctx.save();
-    ctx.shadowColor = 'rgba(255,248,228,0.08)';
-    ctx.shadowBlur = r * 0.05;
-    ctx.strokeStyle = 'rgba(255,248,228,0.07)';
-    ctx.lineWidth = r * 0.016;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.arc(cx, cy, r * 0.93, -Math.PI * 0.9, -Math.PI * 0.64);
-    ctx.stroke();
-    ctx.restore();
-
-    // 非常淡且模糊的亮面，不使用条状高光
+    // 沿刻槽生长的掠射高光：让反光顺着盘面纹理走，而不是像贴了一层玻璃。
     ctx.save();
     ctx.translate(cx, cy);
-    ctx.rotate(-0.72);
-    ctx.shadowColor = 'rgba(255,248,228,0.04)';
-    ctx.shadowBlur = r * 0.12;
-    const areaSheen = ctx.createRadialGradient(
-      -r * 0.28,
-      -r * 0.56,
-      0,
-      -r * 0.28,
-      -r * 0.56,
-      r * 0.5
-    );
-    areaSheen.addColorStop(0, 'rgba(255,248,228,0.016)');
-    areaSheen.addColorStop(0.28, 'rgba(255,248,228,0.008)');
-    areaSheen.addColorStop(0.58, 'rgba(255,248,228,0.002)');
-    areaSheen.addColorStop(1, 'rgba(255,248,228,0)');
-    ctx.fillStyle = areaSheen;
-    ctx.beginPath();
-    ctx.ellipse(-r * 0.16, -r * 0.52, r * 0.34, r * 0.12, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+    ctx.globalCompositeOperation = 'screen';
 
-    // 下侧轻微冷反射，避免盘面死黑
-    const lowerBounce = ctx.createLinearGradient(cx, cy + r * 0.22, cx, cy + r);
-    lowerBounce.addColorStop(0, 'rgba(90,100,120,0)');
-    lowerBounce.addColorStop(0.7, 'rgba(90,100,120,0.012)');
-    lowerBounce.addColorStop(1, 'rgba(90,100,120,0.02)');
+    const grooveInner = r * LABEL_RADIUS * 1.22;
+    const grooveOuter = r * 0.985;
+    const highlightBands = [
+      { start: -2.22, end: -1.48, peak: -1.86, alpha: 0.1, width: 1.1, feather: 0.16 },
+      { start: -1.28, end: -0.86, peak: -1.04, alpha: 0.055, width: 0.72, feather: 0.12 },
+      { start: 1.94, end: 2.18, peak: 2.07, alpha: 0.022, width: 0.58, feather: 0.1 },
+    ];
+
+    for (const band of highlightBands) {
+      ctx.save();
+      ctx.shadowColor = `rgba(255, 246, 220, ${band.alpha * 0.16})`;
+      ctx.shadowBlur = r * 0.018;
+      const gradient = ctx.createConicGradient(0, 0, 0);
+      const fadeInStart = toConicStop(band.start - band.feather);
+      const solidStart = toConicStop(band.start + band.feather * 0.18);
+      const peakStop = toConicStop(band.peak);
+      const solidEnd = toConicStop(band.end - band.feather * 0.18);
+      const fadeOutEnd = toConicStop(band.end + band.feather);
+      gradient.addColorStop(0, 'rgba(255, 247, 224, 0)');
+      gradient.addColorStop(fadeInStart, 'rgba(255, 247, 224, 0)');
+      gradient.addColorStop(solidStart, `rgba(255, 247, 224, ${band.alpha * 0.42})`);
+      gradient.addColorStop(peakStop, `rgba(255, 247, 224, ${band.alpha})`);
+      gradient.addColorStop(solidEnd, `rgba(255, 247, 224, ${band.alpha * 0.36})`);
+      gradient.addColorStop(fadeOutEnd, 'rgba(255, 247, 224, 0)');
+      gradient.addColorStop(1, 'rgba(255, 247, 224, 0)');
+      ctx.strokeStyle = gradient;
+
+      const ringCount = Math.max(44, Math.round((grooveOuter - grooveInner) / 3.1));
+      for (let i = 0; i < ringCount; i++) {
+        const t = i / (ringCount - 1);
+        const rr = grooveInner + (grooveOuter - grooveInner) * t;
+        const centerWeight = 1 - Math.abs(t - 0.52) / 0.52;
+        const radiusAlpha = Math.pow(Math.max(0, centerWeight), 1.05);
+        const shimmer = 0.82 + 0.18 * Math.sin(t * 26 + band.peak * 3.4);
+        const alpha = band.alpha * radiusAlpha * shimmer;
+
+        ctx.beginPath();
+        ctx.arc(0, 0, rr, 0, TAU);
+        ctx.globalAlpha = alpha / band.alpha;
+        ctx.lineWidth = band.width;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    ctx.globalCompositeOperation = 'soft-light';
+    const blendWash = ctx.createRadialGradient(-r * 0.24, -r * 0.42, 0, -r * 0.24, -r * 0.42, r * 0.72);
+    blendWash.addColorStop(0, 'rgba(255, 248, 228, 0.03)');
+    blendWash.addColorStop(0.4, 'rgba(255, 248, 228, 0.012)');
+    blendWash.addColorStop(1, 'rgba(255, 248, 228, 0)');
+    ctx.fillStyle = blendWash;
     ctx.beginPath();
-    ctx.arc(cx, cy, r * 0.98, Math.PI * 0.18, Math.PI * 0.82);
-    ctx.strokeStyle = lowerBounce;
-    ctx.lineWidth = r * 0.05;
-    ctx.stroke();
+    ctx.arc(0, 0, r * 0.985, 0, Math.PI * 2);
+    ctx.arc(0, 0, grooveInner, 0, Math.PI * 2, true);
+    ctx.fill('evenodd');
+    ctx.restore();
 
     ctx.restore();
   }
@@ -1127,42 +1125,48 @@
   }
 
   function drawTrackMarkers(W: number, H: number) {
-    if (!side) return;
-    const { cx, cy, discRadius: r, pivotNormX, pivotNormY } = getTonearmGeometry(W, H);
+    if (!side || side.tracks.length < 2) return;
+    const { cx, cy, discRadius: r } = getTurntableGeometry(W, H);
+    const grooveOuterPx = r * GROOVE_OUTER_RADIUS;
+    const grooveInnerPx = r * getPlayableInnerRadius(side.totalDuration);
+    const markerBandWidth = Math.max(0.95, r * 0.0048);
+    const shadowBandWidth = markerBandWidth * 1.45;
+    const sheenBandWidth = Math.max(0.45, markerBandWidth * 0.24);
 
     ctx.save();
     ctx.translate(cx, cy);
-
-    for (let i = 0; i <= 26; i++) {
-      const t = i / 26;
-      const radius = GROOVE_OUTER_RADIUS + (GROOVE_INNER_RADIUS - GROOVE_OUTER_RADIUS) * t;
-      const { discAngle } = solveStylusPosition(radius, pivotNormX, pivotNormY);
-      const guideHalfSpan = 0.022 - t * 0.006;
-
-      ctx.beginPath();
-      ctx.arc(0, 0, radius * r, discAngle - guideHalfSpan, discAngle + guideHalfSpan);
-      ctx.strokeStyle = `rgba(210, 196, 150, ${0.035 + (1 - t) * 0.015})`;
-      ctx.lineWidth = 0.55;
-      ctx.stroke();
-    }
+    ctx.beginPath();
+    ctx.arc(0, 0, grooveOuterPx, 0, Math.PI * 2);
+    ctx.arc(0, 0, grooveInnerPx, 0, Math.PI * 2, true);
+    ctx.clip('evenodd');
 
     let accumulated = 0;
     for (let i = 1; i < side.tracks.length; i++) {
       accumulated += side.tracks[i - 1].duration;
-      const markerRadius = trackOffsetToRadius(accumulated, side.totalDuration);
-      const { discAngle } = solveStylusPosition(markerRadius, pivotNormX, pivotNormY);
-      const markerHalfSpan = 0.04;
+      const markerRadius = trackOffsetToRadius(accumulated, side.totalDuration) * r;
 
       ctx.beginPath();
-      ctx.arc(0, 0, markerRadius * r, discAngle - markerHalfSpan, discAngle + markerHalfSpan);
-      ctx.strokeStyle = 'rgba(225, 210, 165, 0.42)';
-      ctx.lineWidth = 0.9;
+      ctx.arc(0, 0, markerRadius, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(8, 7, 5, 0.10)';
+      ctx.lineWidth = shadowBandWidth;
       ctx.stroke();
 
       ctx.beginPath();
-      ctx.arc(0, 0, markerRadius * r, discAngle - markerHalfSpan * 0.62, discAngle + markerHalfSpan * 0.62);
-      ctx.strokeStyle = 'rgba(245, 232, 190, 0.2)';
-      ctx.lineWidth = 0.45;
+      ctx.arc(0, 0, markerRadius, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(214, 200, 166, 0.035)';
+      ctx.lineWidth = markerBandWidth;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(0, 0, markerRadius - markerBandWidth * 0.32, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)';
+      ctx.lineWidth = sheenBandWidth;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(0, 0, markerRadius + markerBandWidth * 0.24, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(244, 232, 202, 0.03)';
+      ctx.lineWidth = sheenBandWidth;
       ctx.stroke();
     }
 
@@ -1174,8 +1178,6 @@
       pivotWX,
       pivotWY,
       angle,
-      needleX,
-      needleY,
       ux,
       uy,
       nx,
@@ -1342,21 +1344,23 @@
     const angle = armAngle + wobble.armAngle + tonearmAngleJolt;
     const pivotWX = pivotX + wobble.armPivotX;
     const pivotWY = pivotY + wobble.armPivotY;
-    const needleX = pivotWX + Math.cos(angle) * armLengthPx;
-    const needleY = pivotWY + Math.sin(angle) * armLengthPx + tonearmLiftPx;
     const ux = Math.cos(angle);
     const uy = Math.sin(angle);
     const nx = -uy;
     const ny = ux;
-    const shellBaseX = needleX - ux * 15;
-    const shellBaseY = needleY - uy * 15 + tonearmLiftPx * 0.15;
+    const stylusX = pivotWX + ux * armLengthPx;
+    const stylusY = pivotWY + uy * armLengthPx + tonearmLiftPx;
+    const stylusLocalX = 6.8;
+    const stylusLocalY = 7.3;
+    const shellBaseX = stylusX - (ux * stylusLocalX - uy * stylusLocalY);
+    const shellBaseY = stylusY - (uy * stylusLocalX + ux * stylusLocalY) + tonearmLiftPx * 0.15;
 
     return {
       pivotWX,
       pivotWY,
       angle,
-      needleX,
-      needleY,
+      needleX: stylusX,
+      needleY: stylusY,
       ux,
       uy,
       nx,
@@ -1369,8 +1373,8 @@
       armStartY: pivotWY + uy * 11,
       startHalfWidth: 4.8,
       endHalfWidth: 2.2,
-      tipX: shellBaseX + ux * 6.8 - uy * 7.3,
-      tipY: shellBaseY + uy * 6.8 + ux * 7.3,
+      tipX: stylusX,
+      tipY: stylusY,
     };
   }
 
@@ -1508,7 +1512,9 @@
   }
 
   onDestroy(() => {
-    cancelAnimationFrame(animationId);
+    if (animationId !== null) {
+      cancelAnimationFrame(animationId);
+    }
     if (scheduledSyncId !== null) {
       cancelAnimationFrame(scheduledSyncId);
     }
@@ -1521,8 +1527,7 @@
 <div bind:this={wrapElement} class="turntable-wrap">
   <div
     class="machine-unit"
-    style:width={canvasDisplaySize ? `${canvasDisplaySize}px` : undefined}
-    style:height={canvasDisplaySize ? `${canvasDisplaySize}px` : undefined}
+    style={canvasDisplaySize ? `width:${canvasDisplaySize}px;height:${canvasDisplaySize}px` : undefined}
   >
     <canvas
       bind:this={canvas}
@@ -1592,7 +1597,7 @@
     width: 100%;
     height: 100%;
     cursor: default;
-    border-radius: 12px;
+    border-radius: 0.02em;
     box-shadow:
       0 12px 40px rgba(0, 0, 0, 0.42),
       0 4px 12px rgba(0, 0, 0, 0.24);
@@ -1611,6 +1616,7 @@
     position: absolute;
     bottom: 3.8%;
     left: 5%;
+    z-index: 1;
     display: flex;
     align-items: center;
     font-family: 'Courier New', monospace;
@@ -1621,6 +1627,7 @@
     position: absolute;
     bottom: 3.5%;
     right: 4.5%;
+    z-index: 1;
     display: flex;
     flex-direction: column;
     align-items: flex-end;
@@ -1629,7 +1636,7 @@
   }
 
   .art-switch-label {
-    font-size: calc(7px * var(--app-font-scale));
+    font-size: 7px;
     letter-spacing: 0.2em;
     color: rgba(195, 160, 95, 0.38);
     text-transform: uppercase;
@@ -1651,7 +1658,7 @@
   .art-btn {
     padding: 5px 9px;
     font-family: 'Courier New', monospace;
-    font-size: calc(7.5px * var(--app-font-scale));
+    font-size: 7.5px;
     font-weight: 700;
     letter-spacing: 0.15em;
     color: rgba(175, 138, 68, 0.38);
@@ -1689,7 +1696,7 @@
     cursor: pointer;
     flex: 0 0 auto;
     font-family: 'Courier New', monospace;
-    transition: filter 0.1s ease, transform 0.1s ease;
+    transition: filter 0.1s ease;
     box-shadow:
       inset 0 1px 4px rgba(0, 0, 0, 0.55),
       inset 0 -1px 0 rgba(255, 230, 155, 0.04),
@@ -1701,7 +1708,6 @@
   }
 
   .console-btn:active {
-    transform: translateY(1px);
     filter: brightness(0.9);
     box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.75);
   }
@@ -1730,7 +1736,7 @@
   }
 
   .console-btn-text {
-    font-size: calc(8px * var(--app-font-scale));
+    font-size: 8px;
     font-weight: 700;
     letter-spacing: 0.24em;
     color: rgba(218, 190, 135, 0.52);
