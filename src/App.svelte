@@ -23,6 +23,7 @@
     loadLibrary,
     saveLibraryAlbum,
   } from "./lib/library/persistence";
+  import SidebarCrate from "./lib/library/SidebarCrate.svelte";
   import { VinylEngine } from "./lib/audio/vinylEngine";
   import type {
     Album,
@@ -88,6 +89,7 @@
   $: if (!selectedAlbum) {
     isEditorOpen = false;
   }
+
 
   function sortAlbums(albums: LibraryAlbum[]): LibraryAlbum[] {
     return [...albums].sort((left, right) => {
@@ -309,6 +311,7 @@
     libraryPanelVisible = !libraryPanelVisible;
   }
 
+
   function formatTime(seconds: number): string {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
@@ -520,7 +523,10 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="titlebar-drag-region" on:mousedown={onTitlebarMousedown}></div>
   {/if}
-  <div class="studio" class:collapsed-layout={!libraryPanelVisible}>
+  <div
+    class="studio"
+    class:collapsed-layout={!libraryPanelVisible}
+  >
     <aside class="library-panel" class:collapsed={!libraryPanelVisible}>
       {#if libraryPanelVisible}
         <div class="library-shell">
@@ -569,52 +575,22 @@
             <p class="error">{loadError}</p>
           {/if}
 
-          <section class="section library-section now-playing-section">
-            {#if selectedAlbum}
-              <div class="section-head">
-                <span class="section-label">当前专辑</span>
-              </div>
+          <!-- 小木箱：常驻侧边栏的专辑选择器 -->
+          <section class="section sidebar-crate-section">
+            {#if libraryAlbums.length === 0}
+              <p class="empty-state">先导入一张专辑。</p>
+            {:else}
+              <SidebarCrate
+                albums={libraryAlbums}
+                {selectedAlbumId}
+                onSelect={(albumId) => void selectAlbumById(albumId)}
+              />
+            {/if}
+          </section>
 
-              <div class="selected-album-sheet">
-                {#if selectedAlbum.coverUrl}
-                  <img
-                    class="selected-album-cover"
-                    src={selectedAlbum.coverUrl}
-                    alt={`${selectedAlbum.title} 封面`}
-                  />
-                {/if}
-
-                <div class="selected-album-copy">
-                  <div class="selected-album-title">{selectedAlbum.title}</div>
-                  <div class="selected-album-artist">
-                    {selectedAlbum.artist || "未署名艺人"}
-                  </div>
-                  <div class="selected-album-stats">
-                    <span
-                      >{playbackAlbum?.discs ?? Math.ceil(selectedAlbum.sides.length / 2)} 张碟</span
-                    >
-                    <span>{playbackAlbum?.sides.length ?? selectedAlbum.sides.length} 面</span>
-                    <span>{countAlbumTracks(selectedAlbum)} 首</span>
-                    <span>{formatTime(getAlbumDuration(selectedAlbum))}</span>
-                  </div>
-
-                  <div class="selected-album-actions">
-                    <button class="text-action" type="button" on:click={openEditor}>
-                      编辑专辑
-                    </button>
-                    {#if isDesktopApp}
-                      <button
-                        class="text-action"
-                        type="button"
-                        on:click={() => void importAlbum("files", "current")}
-                      >
-                        追加文件
-                      </button>
-                    {/if}
-                  </div>
-                </div>
-              </div>
-
+          <!-- 当前盘面 + 曲目列表 -->
+          {#if selectedAlbum}
+            <section class="section library-section now-playing-section">
               {#if playbackAlbum && currentSide}
                 <div class="side-sheet">
                   <div class="side-sheet-head">
@@ -648,19 +624,11 @@
                     {#each currentSide.tracks as track, index}
                       <div
                         class="sidebar-track"
-                        class:playing={isCurrentTrack(
-                          currentSide,
-                          index,
-                          currentTime,
-                        )}
+                        class:playing={isCurrentTrack(currentSide, index, currentTime)}
                       >
-                        <span class="sidebar-track-num"
-                          >{String(index + 1).padStart(2, "0")}</span
-                        >
+                        <span class="sidebar-track-num">{String(index + 1).padStart(2, "0")}</span>
                         <span class="sidebar-track-title">{track.title}</span>
-                        <span class="sidebar-track-duration"
-                          >{formatTime(track.duration)}</span
-                        >
+                        <span class="sidebar-track-duration">{formatTime(track.duration)}</span>
                       </div>
                     {/each}
                   </div>
@@ -668,44 +636,28 @@
               {:else}
                 <p class="helper side-helper">当前专辑还没有可播放的盘面。</p>
               {/if}
-            {:else}
-              <p class="empty-state">先导入一张专辑。</p>
-            {/if}
-          </section>
+            </section>
+          {/if}
 
-          <section class="section library-section catalog-section">
-            <div class="section-head catalog-head">
-              <div class="section-label">专辑目录</div>
-              <span class="catalog-count">{libraryAlbums.length} 张收藏</span>
-            </div>
-            {#if libraryAlbums.length === 0}
-              <p class="empty-state">
-                还没有专辑，先从本地音频文件或文件夹导入。
-              </p>
-            {:else}
-              <div class="album-list">
-                {#each libraryAlbums as item, index}
-                  {@const pb = libraryAlbumToPlaybackAlbum(item)}
+          <!-- 编辑入口（仅在选中专辑时显示）-->
+          {#if selectedAlbum}
+            <section class="section library-section">
+              <div class="selected-album-actions">
+                <button class="text-action" type="button" on:click={openEditor}>
+                  编辑专辑
+                </button>
+                {#if isDesktopApp}
                   <button
-                    class="album-card"
-                    class:active={item.id === selectedAlbumId}
-                    on:click={() => void selectAlbumById(item.id)}
+                    class="text-action"
                     type="button"
+                    on:click={() => void importAlbum("files", "current")}
                   >
-                    <span class="album-card-index">
-                      {String(index + 1).padStart(2, "0")}
-                    </span>
-                    <span class="album-card-copy">
-                      <span class="album-card-title">{item.title}</span>
-                      <span class="album-card-meta">
-                        {pb.discs} 张碟 · {pb.sides.length} 面 · {countAlbumTracks(item)} 首
-                      </span>
-                    </span>
+                    追加文件
                   </button>
-                {/each}
+                {/if}
               </div>
-            {/if}
-          </section>
+            </section>
+          {/if}
         </div>
       {:else}
         <button
@@ -916,6 +868,7 @@
       </div>
     </section>
   </div>
+
 </main>
 
 <style>
@@ -977,6 +930,7 @@
   .studio.collapsed-layout {
     grid-template-columns: minmax(60px, 80px) minmax(0, 1fr);
   }
+
 
   .library-panel {
     position: relative;
@@ -1216,10 +1170,6 @@
     border-top: 1px solid rgba(108, 76, 36, 0.18);
   }
 
-  .now-playing-section {
-    padding-top: 0;
-    border-top: none;
-  }
 
   .helper,
   .drawer-title,
@@ -1237,63 +1187,12 @@
     padding: 10px 0 0;
   }
 
-  .selected-album-sheet {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 14px;
-    align-items: start;
-  }
-
-  .selected-album-cover {
-    width: 64px;
-    height: 64px;
-    object-fit: cover;
-    border: 1px solid rgba(98, 69, 31, 0.12);
-    filter: saturate(0.82) contrast(0.94);
-    box-shadow: 0 4px 14px rgba(89, 56, 22, 0.08);
-  }
-
-  .selected-album-copy {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    min-width: 0;
-  }
-
-  .selected-album-title,
   .drawer-title {
     font-size: calc(15px * var(--app-font-scale));
     font-weight: 700;
     color: #2c1905;
     letter-spacing: 0.01em;
     line-height: 1.2;
-  }
-
-  .selected-album-artist {
-    font-size: calc(11px * var(--app-font-scale));
-    line-height: 1.45;
-    color: rgba(86, 56, 18, 0.82);
-    font-style: italic;
-  }
-
-  .selected-album-stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 10px;
-    font-size: calc(9px * var(--app-font-scale));
-    line-height: 1.6;
-    color: rgba(95, 62, 23, 0.8);
-    font-family: "Courier New", monospace;
-  }
-
-  .selected-album-stats span::after {
-    content: "/";
-    margin-left: 10px;
-    color: rgba(109, 75, 34, 0.38);
-  }
-
-  .selected-album-stats span:last-child::after {
-    display: none;
   }
 
   .selected-album-actions,
@@ -1307,6 +1206,7 @@
   .selected-album-actions {
     padding-top: 6px;
   }
+
 
   .selected-album-meta {
     font-size: calc(9px * var(--app-font-scale));
@@ -1429,7 +1329,6 @@
     font-weight: 700;
   }
 
-  .album-list,
   .side-editor-list {
     display: flex;
     flex-direction: column;
@@ -1437,82 +1336,11 @@
     min-width: 0;
   }
 
-  .catalog-head {
-    align-items: baseline;
+  .sidebar-crate-section {
+    padding-top: 0;
+    border-top: none;
   }
 
-  .catalog-count {
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.12em;
-    color: rgba(96, 63, 24, 0.76);
-    text-transform: uppercase;
-    font-family: "Courier New", monospace;
-  }
-
-  .album-card {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 12px;
-    align-items: start;
-    padding: 10px 0 11px 12px;
-    border: 0;
-    border-top: 1px solid rgba(108, 76, 36, 0.16);
-    background: transparent;
-    color: #4c3210;
-    text-align: left;
-    cursor: pointer;
-    transition: color 0.14s ease;
-    position: relative;
-  }
-
-  .album-card:first-child {
-    border-top: 1px solid rgba(108, 76, 36, 0.2);
-  }
-
-  .album-card:hover {
-    color: #2b1905;
-  }
-
-  .album-card.active::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 9px;
-    bottom: 9px;
-    width: 2px;
-    background: rgba(96, 63, 24, 0.76);
-  }
-
-  .album-card-index {
-    padding-top: 1px;
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.18em;
-    color: rgba(108, 73, 31, 0.72);
-    font-family: "Courier New", monospace;
-  }
-
-  .album-card-copy {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .album-card-title {
-    font-size: calc(11px * var(--app-font-scale));
-    font-weight: 700;
-    line-height: 1.25;
-  }
-
-  .album-card.active .album-card-title {
-    color: #2a1703;
-  }
-
-  .album-card-meta {
-    font-size: calc(9px * var(--app-font-scale));
-    line-height: 1.5;
-    color: rgba(87, 57, 20, 0.76);
-  }
 
   .side-helper {
     padding: 6px 0 0;
@@ -1682,7 +1510,12 @@
     min-width: 0;
     min-height: 0;
     overflow: hidden;
+    transition:
+      filter 0.24s ease,
+      transform 0.24s ease,
+      opacity 0.24s ease;
   }
+
 
   .turntable-stage {
     flex: 1;
@@ -1778,8 +1611,5 @@
       align-items: stretch;
     }
 
-    .selected-album-sheet {
-      grid-template-columns: 1fr;
-    }
   }
 </style>
