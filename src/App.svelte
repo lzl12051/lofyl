@@ -9,20 +9,20 @@
   } from "./lib/audio/importAudio";
   import {
     appendPreparedImportToAlbum,
-    countAlbumTracks,
     createLibraryAlbumFromPreparedImport,
-    getAlbumDuration,
-    getSideDuration,
     libraryAlbumToPlaybackAlbum,
     moveTrackWithinAlbum,
     removeTrackFromAlbum,
     renameLibraryAlbum,
+    setLibraryAlbumCover,
+    setLibraryAlbumDiscArt,
   } from "./lib/library/model";
   import {
     deleteLibraryAlbum,
     loadLibrary,
     saveLibraryAlbum,
   } from "./lib/library/persistence";
+  import AlbumWorkshop from "./lib/library/AlbumWorkshop.svelte";
   import SidebarCrate from "./lib/library/SidebarCrate.svelte";
   import { VinylEngine } from "./lib/audio/vinylEngine";
   import type {
@@ -53,8 +53,21 @@
   let isSpectrumEnabled = true;
   let albumTitleDraft = "";
   let titleDraftAlbumId: string | null = null;
-  let isEditorOpen = false;
   let libraryPanelVisible = true;
+  let pendingDeleteAlbumId: string | null = null;
+  let pendingDeleteAlbumTitle = "";
+  let activeView: "player" | "workshop" = "player";
+
+  // ── 唱机切换动画状态 ──────────────────────────────────────────
+  let turntableSwapAnim: 'idle' | 'swap' | 'flip' = 'idle';
+  let turntableSwapFromCover: string | undefined = undefined;
+  let turntableSwapToCover: string | undefined = undefined;
+  let turntableSwapFromDiscArt: string | undefined = undefined;
+  let turntableSwapToDiscArt: string | undefined = undefined;
+  let turntableSwapFromSideLabel: string | undefined = undefined;
+  let turntableSwapToSideLabel: string | undefined = undefined;
+  let swapAnimTimer: ReturnType<typeof setTimeout> | null = null;
+  let isSwitchingSide = false;
 
   const isDesktopApp = isDesktopRuntime();
 
@@ -65,9 +78,12 @@
   }
 
   const PLATTER_SPINUP_MS = 2300;
+  const TRANSPORT_STOP_MS = 1200;
   const TONEARM_CUE_MS = 1500;
   const TONEARM_SETTLE_PAUSE_MS = 110;
   const TONEARM_DROP_MS = 700;
+  const TURNTABLE_SWAP_MS = 3000;
+  const TURNTABLE_FLIP_MS = 1600;
 
   function createEmptyMusicMeterLevels(): number[] {
     return Array.from({ length: MUSIC_METER_BANDS }, () => 0);
@@ -86,8 +102,9 @@
     titleDraftAlbumId = selectedAlbum?.id ?? null;
   }
 
-  $: if (!selectedAlbum) {
-    isEditorOpen = false;
+  $: if ((selectedAlbum?.id ?? null) !== pendingDeleteAlbumId) {
+    pendingDeleteAlbumId = null;
+    pendingDeleteAlbumTitle = "";
   }
 
 
@@ -241,13 +258,77 @@
     await persistAlbum(renameLibraryAlbum(selectedAlbum, trimmedTitle));
   }
 
-  async function saveCurrentAlbumTitleAndClose() {
-    await saveCurrentAlbumTitle();
-    closeEditor();
+  function triggerTurntableAnim(
+    kind: 'swap' | 'flip',
+    options: {
+      fromCoverUrl?: string;
+      toCoverUrl?: string;
+      fromDiscArtUrl?: string;
+      toDiscArtUrl?: string;
+      fromSideLabel?: string;
+      toSideLabel?: string;
+    } = {},
+  ) {
+    if (swapAnimTimer) clearTimeout(swapAnimTimer);
+    turntableSwapFromCover = options.fromCoverUrl;
+    turntableSwapToCover = options.toCoverUrl;
+    turntableSwapFromDiscArt = options.fromDiscArtUrl;
+    turntableSwapToDiscArt = options.toDiscArtUrl;
+    turntableSwapFromSideLabel = options.fromSideLabel;
+    turntableSwapToSideLabel = options.toSideLabel;
+    turntableSwapAnim = kind;
+    const duration = kind === 'swap' ? TURNTABLE_SWAP_MS : TURNTABLE_FLIP_MS;
+    swapAnimTimer = setTimeout(() => {
+      turntableSwapAnim = 'idle';
+      turntableSwapFromCover = undefined;
+      turntableSwapToCover = undefined;
+      turntableSwapFromDiscArt = undefined;
+      turntableSwapToDiscArt = undefined;
+      turntableSwapFromSideLabel = undefined;
+      turntableSwapToSideLabel = undefined;
+    }, duration);
+  }
+
+  async function stopTransportForTransition() {
+    const wasPlaying = isPlaying;
+    const wasActive = isPlaying || isPlatterSpinning || tonearmState !== "parked";
+
+    cancelStartupSequence();
+    if (isPlaying) {
+      engine?.stop();
+      isPlaying = false;
+    }
+    engine?.stopLeadInNoise();
+    isPlatterSpinning = false;
+    tonearmState = "parked";
+    clearManualCueState();
+    resetMusicMeter();
+
+    if (wasActive) {
+      await wait(TRANSPORT_STOP_MS);
+    }
+
+    return { wasPlaying, wasActive };
   }
 
   async function selectAlbumById(albumId: string) {
     if (selectedAlbumId === albumId) return;
+    const previousAlbum = selectedAlbum;
+    const targetAlbum = getAlbumById(albumId);
+    const targetPlaybackAlbum = targetAlbum
+      ? libraryAlbumToPlaybackAlbum(targetAlbum)
+      : null;
+
+    await stopTransportForTransition();
+
+    triggerTurntableAnim('swap', {
+      fromCoverUrl: previousAlbum?.coverUrl,
+      toCoverUrl: targetAlbum?.coverUrl,
+      fromDiscArtUrl: playbackAlbum?.discArtUrl,
+      toDiscArtUrl: targetPlaybackAlbum?.discArtUrl,
+      fromSideLabel: currentSide?.label,
+      toSideLabel: targetPlaybackAlbum?.sides[0]?.label,
+    });
     selectedAlbumId = albumId;
     await syncSelectedAlbumToPlayer(albumId);
   }
@@ -270,9 +351,20 @@
     );
   }
 
+  function requestDeleteCurrentAlbum() {
+    if (!selectedAlbum) return;
+    pendingDeleteAlbumId = selectedAlbum.id;
+    pendingDeleteAlbumTitle = selectedAlbum.title;
+  }
+
+  function cancelDeleteCurrentAlbum() {
+    pendingDeleteAlbumId = null;
+    pendingDeleteAlbumTitle = "";
+  }
+
   async function deleteCurrentAlbum() {
     if (!selectedAlbum) return;
-    if (!window.confirm(`删除专辑《${selectedAlbum.title}》？`)) return;
+    if (pendingDeleteAlbumId !== selectedAlbum.id) return;
 
     isSavingLibrary = true;
     loadError = "";
@@ -284,7 +376,7 @@
         (album) => album.id !== removedAlbumId,
       );
       selectedAlbumId = libraryAlbums[0]?.id ?? null;
-      isEditorOpen = false;
+      cancelDeleteCurrentAlbum();
       await syncSelectedAlbumToPlayer(selectedAlbumId);
     } catch (err) {
       loadError = "删除失败：" + String(err);
@@ -294,17 +386,88 @@
     }
   }
 
-  function getSideLabel(sideIndex: number): string {
-    return String.fromCharCode(65 + sideIndex);
+  function openWorkshop() {
+    activeView = "workshop";
   }
 
-  function openEditor() {
+  function closeWorkshop() {
+    activeView = "player";
+  }
+
+  function readFileAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result === "string" && result.startsWith("data:")) {
+          resolve(result);
+          return;
+        }
+        reject(new Error("无法读取图片数据"));
+      };
+      reader.onerror = () => {
+        reject(reader.error ?? new Error("读取图片失败"));
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handleCustomImageSelected(
+    event: Event,
+    options: {
+      onSave: (album: LibraryAlbum, imageUrl: string) => LibraryAlbum;
+      invalidTypeMessage: string;
+      failedMessage: string;
+    },
+  ) {
+    const album = selectedAlbum;
+    if (!album) return;
+
+    const input = event.currentTarget as HTMLInputElement | null;
+    const file = input?.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      loadError = options.invalidTypeMessage;
+      if (input) input.value = "";
+      return;
+    }
+
+    try {
+      const imageUrl = await readFileAsDataUrl(file);
+      await persistAlbum(options.onSave(album, imageUrl));
+    } catch (err) {
+      loadError = options.failedMessage + String(err);
+      console.error(err);
+    } finally {
+      if (input) input.value = "";
+    }
+  }
+
+  async function handleCustomCoverSelected(event: Event) {
+    await handleCustomImageSelected(event, {
+      onSave: (album, imageUrl) => setLibraryAlbumCover(album, imageUrl),
+      invalidTypeMessage: "封面导入失败：请选择图片文件",
+      failedMessage: "封面导入失败：",
+    });
+  }
+
+  async function clearCustomCover() {
     if (!selectedAlbum) return;
-    isEditorOpen = true;
+    await persistAlbum(setLibraryAlbumCover(selectedAlbum));
   }
 
-  function closeEditor() {
-    isEditorOpen = false;
+  async function handleCustomDiscArtSelected(event: Event) {
+    await handleCustomImageSelected(event, {
+      onSave: (album, imageUrl) => setLibraryAlbumDiscArt(album, imageUrl),
+      invalidTypeMessage: "盘面图导入失败：请选择图片文件",
+      failedMessage: "盘面图导入失败：",
+    });
+  }
+
+  async function clearCustomDiscArt() {
+    if (!selectedAlbum) return;
+    await persistAlbum(setLibraryAlbumDiscArt(selectedAlbum));
   }
 
   function toggleLibraryPanel() {
@@ -390,6 +553,7 @@
   }
 
   async function beginManualCueSpinup() {
+    if (isSwitchingSide) return;
     if (!engine || !currentSide) return;
     if (isPlaying || tonearmState === "cueing" || tonearmState === "dropping")
       return;
@@ -409,6 +573,7 @@
   }
 
   async function beginPlaybackFromManualCue(timeInSide: number) {
+    if (isSwitchingSide) return;
     if (!engine || !currentSide) return;
 
     const token = ++startSequenceToken;
@@ -455,6 +620,7 @@
   }
 
   async function togglePlay() {
+    if (isSwitchingSide) return;
     if (!engine || !currentSide) return;
 
     if (
@@ -477,6 +643,7 @@
   }
 
   async function handleSeek(timeInSide: number) {
+    if (isSwitchingSide) return;
     if (!engine || !currentSide) return;
     currentTime = timeInSide;
     if (isPlaying) {
@@ -485,27 +652,48 @@
   }
 
   async function switchSide(index: number) {
-    if (!playbackAlbum || !engine) return;
+    if (!playbackAlbum || !engine || isSwitchingSide) return;
     if (index < 0 || index >= playbackAlbum.sides.length) return;
+    if (index === currentSideIndex) return;
 
-    cancelStartupSequence();
+    const currentSideRef = playbackAlbum.sides[currentSideIndex];
+    const targetSideRef = playbackAlbum.sides[index];
+    const currentDiscIdx = currentSideRef?.discIndex ?? -1;
+    const targetDiscIdx  = targetSideRef?.discIndex ?? -2;
+    const isSameDisc = currentDiscIdx === targetDiscIdx;
+    const animKind: 'swap' | 'flip' = isSameDisc ? 'flip' : 'swap';
+    const animDuration = animKind === "flip" ? TURNTABLE_FLIP_MS : TURNTABLE_SWAP_MS;
 
-    if (isPlaying) {
-      engine.stop();
-      isPlaying = false;
-    }
-
-    engine.stopLeadInNoise();
-    isPlatterSpinning = false;
-    tonearmState = "parked";
-    clearManualCueState();
-    resetMusicMeter();
-
-    currentSideIndex = index;
-    currentTime = 0;
+    isSwitchingSide = true;
     isLoading = true;
-    await engine.loadSide(playbackAlbum.sides[index]);
-    isLoading = false;
+
+    try {
+      const { wasPlaying } = await stopTransportForTransition();
+
+      triggerTurntableAnim(animKind, {
+        fromCoverUrl: selectedAlbum?.coverUrl,
+        toCoverUrl: selectedAlbum?.coverUrl,
+        fromDiscArtUrl: playbackAlbum?.discArtUrl,
+        toDiscArtUrl: playbackAlbum?.discArtUrl,
+        fromSideLabel: currentSideRef?.label,
+        toSideLabel: targetSideRef?.label,
+      });
+
+      await Promise.all([
+        engine.loadSide(targetSideRef),
+        wait(animDuration),
+      ]);
+
+      currentSideIndex = index;
+      currentTime = 0;
+
+      if (wasPlaying) {
+        await beginPlaybackSequence();
+      }
+    } finally {
+      isLoading = false;
+      isSwitchingSide = false;
+    }
   }
 
   onMount(() => {
@@ -536,29 +724,14 @@
               <h1 class="panel-title">LOFYL</h1>
             </div>
 
-            <div class="panel-toolbar" aria-label="导入新专辑与曲库控制">
-              {#if isDesktopApp}
-                <button
-                  class="text-action"
-                  type="button"
-                  on:click={() => void importAlbum("files", "new")}
-                >
-                  导入文件
-                </button>
-                <button
-                  class="text-action"
-                  type="button"
-                  on:click={() => void importAlbum("folder", "new")}
-                >
-                  导入文件夹
-                </button>
-              {/if}
-
-              {#if selectedAlbum}
-                <button class="text-action" type="button" on:click={openEditor}>
-                  编辑
-                </button>
-              {/if}
+            <div class="panel-toolbar" aria-label="曲库控制">
+              <button
+                class="text-action"
+                type="button"
+                on:click={openWorkshop}
+              >
+                制作专辑
+              </button>
 
               <button
                 class="toggle-library-btn"
@@ -571,14 +744,13 @@
             </div>
           </div>
 
-          {#if loadError}
+          {#if activeView === "player" && loadError}
             <p class="error">{loadError}</p>
           {/if}
 
-          <!-- 小木箱：常驻侧边栏的专辑选择器 -->
           <section class="section sidebar-crate-section">
             {#if libraryAlbums.length === 0}
-              <p class="empty-state">先导入一张专辑。</p>
+              <p class="empty-state">先打开“制作专辑”，导入一张专辑。</p>
             {:else}
               <SidebarCrate
                 albums={libraryAlbums}
@@ -588,7 +760,6 @@
             {/if}
           </section>
 
-          <!-- 当前盘面 + 曲目列表 -->
           {#if selectedAlbum}
             <section class="section library-section now-playing-section">
               {#if playbackAlbum && currentSide}
@@ -607,6 +778,7 @@
                         class="side-link"
                         class:active={index === currentSideIndex}
                         type="button"
+                        disabled={isSwitchingSide}
                         on:click={() => void switchSide(index)}
                         aria-current={index === currentSideIndex ? "true" : undefined}
                       >
@@ -638,26 +810,6 @@
               {/if}
             </section>
           {/if}
-
-          <!-- 编辑入口（仅在选中专辑时显示）-->
-          {#if selectedAlbum}
-            <section class="section library-section">
-              <div class="selected-album-actions">
-                <button class="text-action" type="button" on:click={openEditor}>
-                  编辑专辑
-                </button>
-                {#if isDesktopApp}
-                  <button
-                    class="text-action"
-                    type="button"
-                    on:click={() => void importAlbum("files", "current")}
-                  >
-                    追加文件
-                  </button>
-                {/if}
-              </div>
-            </section>
-          {/if}
         </div>
       {:else}
         <button
@@ -669,160 +821,9 @@
           显示库
         </button>
       {/if}
-
-      {#if libraryPanelVisible && selectedAlbum && isEditorOpen}
-        <section class="editor-drawer" aria-label="专辑编辑器">
-          <div class="arranger-head">
-            <div class="drawer-title-block">
-              <div class="section-label">专辑编辑</div>
-              <div class="drawer-title">{selectedAlbum.title}</div>
-              <div class="arranger-meta">
-                {playbackAlbum?.discs ?? Math.ceil(selectedAlbum.sides.length / 2)} 张碟 · {playbackAlbum?.sides.length ?? selectedAlbum.sides.length} 面 ·
-                {countAlbumTracks(selectedAlbum)} 首 · {formatTime(
-                  getAlbumDuration(selectedAlbum),
-                )}
-              </div>
-            </div>
-
-            <button
-              class="text-action close-btn"
-              type="button"
-              on:click={closeEditor}
-            >
-              收起
-            </button>
-          </div>
-
-          <div class="title-editor">
-            <label class="title-editor-label" for="album-title-input">
-              标题
-            </label>
-            <div class="title-editor-field">
-              <input
-                id="album-title-input"
-                class="title-input"
-                bind:value={albumTitleDraft}
-                placeholder="专辑名称"
-                on:blur={() => void saveCurrentAlbumTitle()}
-              />
-              <button
-                class="save-btn"
-                type="button"
-                on:click={() => void saveCurrentAlbumTitleAndClose()}
-              >
-                保存
-              </button>
-            </div>
-          </div>
-
-          {#if isDesktopApp}
-            <div class="drawer-actions">
-              <button
-                class="text-action"
-                type="button"
-                on:click={() => void importAlbum("files", "current")}
-              >
-                追加文件到当前专辑
-              </button>
-              <button
-                class="text-action"
-                type="button"
-                on:click={() => void importAlbum("folder", "current")}
-              >
-                追加文件夹到当前专辑
-              </button>
-              <button
-                class="text-action danger-btn"
-                type="button"
-                on:click={() => void deleteCurrentAlbum()}
-              >
-                删除专辑
-              </button>
-            </div>
-          {/if}
-
-          {#if selectedAlbum.sides.length === 0}
-            <p class="empty-state">当前专辑还没有曲目，可以继续追加导入。</p>
-          {:else}
-            <div class="side-editor-list">
-              {#each selectedAlbum.sides as sideTracks, sideIndex}
-                <section class="side-editor">
-                  <div class="side-editor-head">
-                    <span class="side-editor-title"
-                      >Side {getSideLabel(sideIndex)}</span
-                    >
-                    <span class="side-editor-meta">
-                      {sideTracks.length} 首 · {formatTime(
-                        getSideDuration(sideTracks),
-                      )}
-                    </span>
-                  </div>
-
-                  <div class="editor-track-list">
-                    {#each sideTracks as track, trackIndex}
-                      <div class="editor-track">
-                        <div class="editor-track-body">
-                          <span class="editor-track-title">{track.title}</span>
-                          <span class="editor-track-path"
-                            >{track.sourceDisplayPath}</span
-                          >
-                        </div>
-
-                        <div class="editor-track-tools">
-                          <button
-                            class="editor-track-tool"
-                            type="button"
-                            on:click={() =>
-                              void moveTrack(sideIndex, trackIndex, "up")}
-                          >
-                            ↑
-                          </button>
-                          <button
-                            class="editor-track-tool"
-                            type="button"
-                            on:click={() =>
-                              void moveTrack(sideIndex, trackIndex, "down")}
-                          >
-                            ↓
-                          </button>
-                          <button
-                            class="editor-track-tool"
-                            type="button"
-                            disabled={sideIndex === 0}
-                            on:click={() =>
-                              void moveTrack(sideIndex, trackIndex, "left")}
-                          >
-                            ←
-                          </button>
-                          <button
-                            class="editor-track-tool"
-                            type="button"
-                            on:click={() =>
-                              void moveTrack(sideIndex, trackIndex, "right")}
-                          >
-                            →
-                          </button>
-                          <button
-                            type="button"
-                            class="editor-track-tool danger-icon"
-                            on:click={() =>
-                              void removeTrack(sideIndex, trackIndex)}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                </section>
-              {/each}
-            </div>
-          {/if}
-        </section>
-      {/if}
     </aside>
 
-    <section class="turntable-panel">
+    <section class="main-panel" class:workshop-mode={activeView === "workshop"}>
       {#if isLoading || isSavingLibrary}
         <div class="turntable-status-bar">
           {#if isLoading}
@@ -834,38 +835,72 @@
         </div>
       {/if}
 
-      <div class="turntable-stage">
-        <Turntable
-          side={currentSide}
-          {currentTime}
-          {isPlaying}
-          {isPlatterSpinning}
-          {tonearmState}
-          {musicMeterLevels}
-          {isSpectrumEnabled}
-          coverUrl={playbackAlbum?.coverUrl}
-          artworkMode={discArtworkMode}
-          onArtworkModeChange={(mode) => {
-            discArtworkMode = mode;
-          }}
-          onToggleSpectrum={() => {
-            isSpectrumEnabled = !isSpectrumEnabled;
-          }}
-          onSeek={handleSeek}
-          onTogglePlay={togglePlay}
-          onNeedleDragStart={() => {
-            void beginManualCueSpinup();
-          }}
-          onNeedleDrop={(timeInSide) => {
-            if (isPlaying) return;
-            if (timeInSide === null) {
-              cancelManualCueInteraction();
-              return;
-            }
-            void beginPlaybackFromManualCue(timeInSide);
-          }}
+      {#if activeView === "workshop"}
+        <AlbumWorkshop
+          album={selectedAlbum}
+          {playbackAlbum}
+          bind:albumTitleDraft
+          {isDesktopApp}
+          isBusy={isLoading || isSavingLibrary}
+          {loadError}
+          {pendingDeleteAlbumId}
+          {pendingDeleteAlbumTitle}
+          onBack={closeWorkshop}
+          onSaveTitle={() => void saveCurrentAlbumTitle()}
+          onImport={(kind, target) => void importAlbum(kind, target)}
+          onRequestDelete={requestDeleteCurrentAlbum}
+          onCancelDelete={cancelDeleteCurrentAlbum}
+          onDelete={() => void deleteCurrentAlbum()}
+          onMoveTrack={(sideIndex, trackIndex, direction) =>
+            void moveTrack(sideIndex, trackIndex, direction)}
+          onRemoveTrack={(sideIndex, trackIndex) =>
+            void removeTrack(sideIndex, trackIndex)}
+          onCoverSelected={(event) => void handleCustomCoverSelected(event)}
+          onClearCover={() => void clearCustomCover()}
+          onDiscArtSelected={(event) => void handleCustomDiscArtSelected(event)}
+          onClearDiscArt={() => void clearCustomDiscArt()}
         />
-      </div>
+      {:else}
+        <div class="turntable-stage">
+          <Turntable
+            side={currentSide}
+            {currentTime}
+            {isPlaying}
+            {isPlatterSpinning}
+            {tonearmState}
+            {musicMeterLevels}
+            {isSpectrumEnabled}
+            discArtworkUrl={playbackAlbum?.discArtUrl}
+            artworkMode={discArtworkMode}
+            swapAnim={turntableSwapAnim}
+            swapFromCoverUrl={turntableSwapFromCover}
+            swapToCoverUrl={turntableSwapToCover}
+            swapFromDiscArtworkUrl={turntableSwapFromDiscArt}
+            swapToDiscArtworkUrl={turntableSwapToDiscArt}
+            swapFromSideLabel={turntableSwapFromSideLabel}
+            swapToSideLabel={turntableSwapToSideLabel}
+            onArtworkModeChange={(mode) => {
+              discArtworkMode = mode;
+            }}
+            onToggleSpectrum={() => {
+              isSpectrumEnabled = !isSpectrumEnabled;
+            }}
+            onSeek={handleSeek}
+            onTogglePlay={togglePlay}
+            onNeedleDragStart={() => {
+              void beginManualCueSpinup();
+            }}
+            onNeedleDrop={(timeInSide) => {
+              if (isPlaying) return;
+              if (timeInSide === null) {
+                cancelManualCueInteraction();
+                return;
+              }
+              void beginPlaybackFromManualCue(timeInSide);
+            }}
+          />
+        </div>
+      {/if}
     </section>
   </div>
 
@@ -900,14 +935,15 @@
     padding-top: 52px;
   }
 
-  main.desktop-overlay-shell .turntable-panel {
+  main.desktop-overlay-shell .main-panel {
     padding: 44px 0 0;
     gap: 0;
     border-radius: 0 10px 10px 0;
   }
 
-  main.desktop-overlay-shell .editor-drawer {
-    padding-top: 72px;
+  main.desktop-overlay-shell .turntable-status-bar {
+    top: 10px;
+    right: 18px;
   }
 
   .titlebar-drag-region {
@@ -975,8 +1011,7 @@
     white-space: nowrap;
   }
 
-  .library-shell,
-  .editor-drawer {
+  .library-shell {
     display: flex;
     flex-direction: column;
     gap: 18px;
@@ -993,50 +1028,25 @@
     scrollbar-color: rgba(126, 94, 47, 0.28) transparent;
   }
 
-  .editor-drawer {
-    position: absolute;
-    inset: 0;
-    z-index: 2;
-    padding: 22px 16px 18px 14px;
-    overflow-y: auto;
-    background:
-      linear-gradient(180deg, rgba(253, 249, 241, 0.98), rgba(242, 229, 204, 0.99)),
-      repeating-linear-gradient(
-        180deg,
-        rgba(132, 95, 43, 0.03) 0,
-        rgba(132, 95, 43, 0.03) 1px,
-        transparent 1px,
-        transparent 30px
-      );
-    box-shadow: 12px 0 28px rgba(84, 52, 18, 0.12);
-    scrollbar-width: thin;
-    scrollbar-color: rgba(126, 94, 47, 0.28) transparent;
-  }
-
-  .library-shell::-webkit-scrollbar,
-  .editor-drawer::-webkit-scrollbar {
+  .library-shell::-webkit-scrollbar {
     width: 7px;
   }
 
-  .library-shell::-webkit-scrollbar-track,
-  .editor-drawer::-webkit-scrollbar-track {
+  .library-shell::-webkit-scrollbar-track {
     background: transparent;
   }
 
-  .library-shell::-webkit-scrollbar-thumb,
-  .editor-drawer::-webkit-scrollbar-thumb {
+  .library-shell::-webkit-scrollbar-thumb {
     background: rgba(112, 79, 37, 0.24);
     border-radius: 999px;
     border: 1px solid rgba(255, 247, 233, 0.36);
   }
 
-  .library-shell::-webkit-scrollbar-thumb:hover,
-  .editor-drawer::-webkit-scrollbar-thumb:hover {
+  .library-shell::-webkit-scrollbar-thumb:hover {
     background: rgba(112, 79, 37, 0.38);
   }
 
-  .panel-head,
-  .arranger-head {
+  .panel-head {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -1061,6 +1071,11 @@
     gap: 6px;
     flex-wrap: wrap;
     justify-content: flex-end;
+    position: absolute;
+    top: 18px;
+    right: 18px;
+    z-index: 3;
+    pointer-events: none;
   }
 
   .eyebrow {
@@ -1120,13 +1135,6 @@
     font-family: "Courier New", monospace;
   }
 
-  .section-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
   .text-action,
   .toggle-library-btn {
     border: 0;
@@ -1172,8 +1180,6 @@
 
 
   .helper,
-  .drawer-title,
-  .arranger-meta,
   .empty-state {
     font-size: calc(10px * var(--app-font-scale));
     line-height: 1.6;
@@ -1186,27 +1192,6 @@
     line-height: 1.55;
     padding: 10px 0 0;
   }
-
-  .drawer-title {
-    font-size: calc(15px * var(--app-font-scale));
-    font-weight: 700;
-    color: #2c1905;
-    letter-spacing: 0.01em;
-    line-height: 1.2;
-  }
-
-  .selected-album-actions,
-  .drawer-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: center;
-  }
-
-  .selected-album-actions {
-    padding-top: 6px;
-  }
-
 
   .selected-album-meta {
     font-size: calc(9px * var(--app-font-scale));
@@ -1329,13 +1314,6 @@
     font-weight: 700;
   }
 
-  .side-editor-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    min-width: 0;
-  }
-
   .sidebar-crate-section {
     padding-top: 0;
     border-top: none;
@@ -1347,162 +1325,8 @@
     border-top: 1px solid rgba(108, 76, 36, 0.14);
   }
 
-  .title-editor {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    gap: 10px 14px;
-    align-items: start;
-    padding: 6px 0 14px;
-    border-bottom: 1px solid rgba(108, 76, 36, 0.16);
-  }
-
-  .title-editor-label {
-    padding-top: 10px;
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: #846337;
-    font-family: "Courier New", monospace;
-  }
-
-  .title-editor-field {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 10px;
-  }
-
-  .title-input {
-    width: 100%;
-    border: 0;
-    border-bottom: 1px solid rgba(127, 98, 57, 0.26);
-    padding: 8px 0 7px;
-    background: transparent;
-    color: #432a08;
-    font: inherit;
-  }
-
-  .title-input:focus {
-    outline: none;
-    border-bottom-color: rgba(93, 63, 26, 0.6);
-  }
-
-  .save-btn {
-    border: 0;
-    padding: 8px 0 7px;
-    background: transparent;
-    color: #3c5e49;
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    font-family: "Courier New", monospace;
-    cursor: pointer;
-  }
-
-  .danger-btn,
-  .danger-icon {
-    color: #933122;
-  }
-
-  .close-btn {
-    align-self: flex-start;
-  }
-
-  .drawer-title-block {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .drawer-actions {
-    padding-bottom: 14px;
-    border-bottom: 1px solid rgba(108, 76, 36, 0.16);
-  }
-
-  .side-editor {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 14px 0 0;
-    border-top: 1px solid rgba(108, 76, 36, 0.16);
-  }
-
-  .side-editor-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .side-editor-title {
-    font-size: calc(14px * var(--app-font-scale));
-    font-weight: 700;
-    color: #3a2405;
-  }
-
-  .side-editor-meta,
-  .editor-track-path {
-    font-size: calc(10px * var(--app-font-scale));
-    color: #8c6d42;
-  }
-
-  .editor-track-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    min-width: 0;
-  }
-
-  .editor-track {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 10px;
-    align-items: center;
-    padding: 8px 0;
-    border-bottom: 1px dotted rgba(127, 98, 57, 0.18);
-  }
-
-  .editor-track-body {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-
-  .editor-track-title {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: #382104;
-    font-size: calc(12px * var(--app-font-scale));
-  }
-
-  .editor-track-tools {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .editor-track-tool {
-    border: 0;
-    padding: 0;
-    background: transparent;
-    color: #613c12;
-    font-size: calc(11px * var(--app-font-scale));
-    font-family: "Courier New", monospace;
-    cursor: pointer;
-    transition: color 0.14s ease;
-  }
-
-  .editor-track-tool:hover {
-    color: #2b1702;
-  }
-
-  .editor-track-tool:disabled {
-    opacity: 0.34;
-    cursor: default;
-  }
-
-  .turntable-panel {
+  .main-panel {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 12px;
@@ -1532,7 +1356,7 @@
       grid-template-columns: minmax(272px, 300px) minmax(0, 1fr);
     }
 
-    .turntable-panel {
+    .main-panel {
       padding: 18px 16px 14px;
     }
   }
@@ -1549,10 +1373,6 @@
 
     main.desktop-overlay-shell .library-panel {
       padding-top: 0px;
-    }
-
-    main.desktop-overlay-shell .editor-drawer {
-      padding-top: 20px;
     }
 
     .titlebar-drag-region {
@@ -1580,26 +1400,8 @@
       grid-template-columns: 1fr;
     }
 
-    .editor-drawer {
-      padding: 20px 18px;
-    }
-
     .turntable-stage {
       min-height: min(62vw, 520px);
-    }
-
-    .title-editor {
-      grid-template-columns: 1fr;
-      gap: 8px;
-    }
-
-    .title-editor-field {
-      grid-template-columns: 1fr;
-    }
-
-    .arranger-head {
-      flex-direction: column;
-      align-items: stretch;
     }
 
     .turntable-status-bar {

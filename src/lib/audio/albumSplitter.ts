@@ -81,7 +81,8 @@ export function buildAlbum(
   title: string,
   artist: string,
   tracks: Track[],
-  coverUrl?: string
+  coverUrl?: string,
+  discArtUrl?: string
 ): Album {
   const sides = splitTracksIntoSides(tracks);
   return {
@@ -89,6 +90,7 @@ export function buildAlbum(
     title,
     artist,
     coverUrl,
+    discArtUrl,
     sides,
     discs: Math.ceil(sides.length / 2),
   };
@@ -99,7 +101,8 @@ export function buildAlbumFromSides(
   title: string,
   artist: string,
   sideTracks: Track[][],
-  coverUrl?: string
+  coverUrl?: string,
+  discArtUrl?: string
 ): Album {
   const sides = sideTracks
     .filter((tracks) => tracks.length > 0)
@@ -116,6 +119,7 @@ export function buildAlbumFromSides(
     title,
     artist,
     coverUrl,
+    discArtUrl,
     sides,
     discs: Math.ceil(sides.length / 2),
   };

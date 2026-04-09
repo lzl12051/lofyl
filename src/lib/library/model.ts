@@ -70,6 +70,7 @@ export function createLibraryAlbumFromPreparedImport(
     title: prepared.albumTitle,
     artist: prepared.albumArtist ?? inferAlbumArtistFromTracks(hydratedTracks),
     coverUrl: prepared.coverUrl,
+    discArtUrl: undefined,
     sides,
     createdAt: now,
     updatedAt: now,
@@ -80,6 +81,7 @@ export function appendPreparedImportToAlbum(album: LibraryAlbum, prepared: Prepa
   const nextAlbum: LibraryAlbum = {
     ...album,
     coverUrl: album.coverUrl ?? prepared.coverUrl,
+    discArtUrl: album.discArtUrl,
     sides: cloneSides(album.sides),
     updatedAt: Date.now(),
   };
@@ -179,6 +181,22 @@ export function renameLibraryAlbum(album: LibraryAlbum, title: string): LibraryA
   };
 }
 
+export function setLibraryAlbumCover(album: LibraryAlbum, coverUrl?: string): LibraryAlbum {
+  return {
+    ...album,
+    coverUrl: coverUrl?.trim() || undefined,
+    updatedAt: Date.now(),
+  };
+}
+
+export function setLibraryAlbumDiscArt(album: LibraryAlbum, discArtUrl?: string): LibraryAlbum {
+  return {
+    ...album,
+    discArtUrl: discArtUrl?.trim() || undefined,
+    updatedAt: Date.now(),
+  };
+}
+
 export function libraryAlbumToPlaybackAlbum(album: LibraryAlbum): Album {
   // 将 LibraryAlbum 各面展平后，对超长曲目进行虚拟分段展开，再重新分配碟面。
   // 展开只在播放转换时发生，不影响持久化模型，避免 DB 中 source_path 重复。
@@ -186,7 +204,14 @@ export function libraryAlbumToPlaybackAlbum(album: LibraryAlbum): Album {
     .flat()
     .flatMap((track) => expandLongTrack(hydrateTrack(track), MAX_SIDE_DURATION));
 
-  return buildAlbum(album.id, album.title, album.artist, playbackTracks, album.coverUrl);
+  return buildAlbum(
+    album.id,
+    album.title,
+    album.artist,
+    playbackTracks,
+    album.coverUrl,
+    album.discArtUrl ?? album.coverUrl
+  );
 }
 
 export function hydrateLibraryAlbum(album: LibraryAlbum): LibraryAlbum {
@@ -194,6 +219,8 @@ export function hydrateLibraryAlbum(album: LibraryAlbum): LibraryAlbum {
   return {
     ...album,
     artist: album.artist.trim() || inferAlbumArtistFromTracks(hydratedSides.flat()),
+    coverUrl: album.coverUrl?.trim() || undefined,
+    discArtUrl: album.discArtUrl?.trim() || undefined,
     sides: hydratedSides,
   };
 }
@@ -201,6 +228,8 @@ export function hydrateLibraryAlbum(album: LibraryAlbum): LibraryAlbum {
 export function serializeLibraryAlbum(album: LibraryAlbum): LibraryAlbum {
   return {
     ...album,
+    coverUrl: album.coverUrl?.trim() || undefined,
+    discArtUrl: album.discArtUrl?.trim() || undefined,
     sides: album.sides.map((side) =>
       side
         .filter((track) => Boolean(track.sourcePath))

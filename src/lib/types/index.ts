@@ -3,6 +3,8 @@ export interface Track {
   id: string;
   title: string;
   artist: string;
+  trackNumber?: number;
+  discNumber?: number;
   duration: number; // 秒
   file?: File;
   sourcePath?: string;
@@ -29,6 +31,7 @@ export interface Album {
   title: string;
   artist: string;
   coverUrl?: string;
+  discArtUrl?: string;
   sides: DiscSide[];
   discs: number; // 碟片总数
 }
@@ -38,6 +41,7 @@ export interface LibraryAlbum {
   title: string;
   artist: string;
   coverUrl?: string;
+  discArtUrl?: string;
   sides: Track[][];
   createdAt: number;
   updatedAt: number;

@@ -9,6 +9,9 @@ interface AudioSourceEntry {
   displayPath: string;
   title?: string;
   artist?: string;
+  trackNumber?: number;
+  discNumber?: number;
+  coverUrl?: string;
 }
 
 interface AudioImportSelection {
@@ -39,6 +42,35 @@ function getBaseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
 }
 
+function compareOptionalNumber(left?: number, right?: number): number {
+  if (left != null && right != null) {
+    return left - right;
+  }
+  if (left != null) {
+    return -1;
+  }
+  if (right != null) {
+    return 1;
+  }
+  return 0;
+}
+
+function compareTrackOrder(left: Track, right: Track): number {
+  const discOrder = compareOptionalNumber(left.discNumber, right.discNumber);
+  if (discOrder !== 0) {
+    return discOrder;
+  }
+
+  const trackOrder = compareOptionalNumber(left.trackNumber, right.trackNumber);
+  if (trackOrder !== 0) {
+    return trackOrder;
+  }
+
+  const leftPath = left.sourceDisplayPath ?? left.file?.name ?? left.title;
+  const rightPath = right.sourceDisplayPath ?? right.file?.name ?? right.title;
+  return leftPath.localeCompare(rightPath, undefined, { numeric: true, sensitivity: 'base' });
+}
+
 async function decodeDuration(ctx: AudioContext, data: ArrayBuffer): Promise<number> {
   try {
     const buffer = await ctx.decodeAudioData(data.slice(0));
@@ -54,6 +86,9 @@ async function buildPreparedImport(
     name: string;
     title?: string;
     artist?: string;
+    trackNumber?: number;
+    discNumber?: number;
+    coverUrl?: string;
     displayPath?: string;
     mimeType?: string;
     file?: File;
@@ -75,13 +110,15 @@ async function buildPreparedImport(
       const arrayBuffer = await source.loadArrayBuffer();
 
       if (!coverUrl) {
-        coverUrl = extractEmbeddedCover(arrayBuffer.slice(0), source.mimeType);
+        coverUrl = source.coverUrl ?? extractEmbeddedCover(arrayBuffer.slice(0), source.mimeType);
       }
 
       tracks.push({
         id: `track-${index}-${source.idBase}`,
         title: source.title ?? stripTrackNumberPrefix(stripExtension(source.name)),
         artist: source.artist?.trim() ?? '',
+        trackNumber: source.trackNumber,
+        discNumber: source.discNumber,
         duration: await decodeDuration(ctx, arrayBuffer),
         file: source.file,
         sourcePath: source.file ? undefined : source.idBase,
@@ -93,11 +130,7 @@ async function buildPreparedImport(
     await ctx.close();
   }
 
-  tracks.sort((a, b) => {
-    const left = a.sourceDisplayPath ?? a.file?.name ?? a.title;
-    const right = b.sourceDisplayPath ?? b.file?.name ?? b.title;
-    return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' });
-  });
+  tracks.sort(compareTrackOrder);
 
   return {
     albumTitle,
@@ -164,6 +197,9 @@ async function prepareDesktopImport(command: 'pick_audio_files' | 'pick_audio_fo
           displayPath: entry.displayPath,
           title: entry.title,
           artist: entry.artist,
+          trackNumber: entry.trackNumber,
+          discNumber: entry.discNumber,
+          coverUrl: entry.coverUrl,
           mimeType: '',
           loadArrayBuffer: async () => {
             const response = await fetch(assetUrl);

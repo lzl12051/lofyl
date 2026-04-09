@@ -17,7 +17,7 @@
   export let tonearmState: TonearmState = 'parked';
   export let musicMeterLevels: number[] = [];
   export let isSpectrumEnabled: boolean = true;
-  export let coverUrl: string | undefined = undefined;
+  export let discArtworkUrl: string | undefined = undefined;
   export let artworkMode: DiscArtworkMode = 'centered';
   export let onSeek: (timeInSide: number) => void = () => {};
   export let onTogglePlay: () => void = () => {};
@@ -25,6 +25,17 @@
   export let onNeedleDragStart: () => void = () => {};
   export let onNeedleDrop: (timeInSide: number | null) => void = () => {};
   export let onArtworkModeChange: (mode: DiscArtworkMode) => void = () => {};
+
+  // ── 切换动画 ──────────────────────────────────────────────────
+  // 'swap'  换碟/换专辑：封套从顶部伸入，唱片浮起插回封套
+  // 'flip'  翻面（同一张碟）：唱片浮起并绕轴翻转
+  export let swapAnim: 'idle' | 'swap' | 'flip' = 'idle';
+  export let swapFromCoverUrl: string | undefined = undefined;
+  export let swapToCoverUrl: string | undefined = undefined;
+  export let swapFromDiscArtworkUrl: string | undefined = undefined;
+  export let swapToDiscArtworkUrl: string | undefined = undefined;
+  export let swapFromSideLabel: string | undefined = undefined;
+  export let swapToSideLabel: string | undefined = undefined;
 
   const SPECTRUM_ROW_COUNT = 6;
   const SPECTRUM_COLUMN_COUNT = 16;
@@ -94,7 +105,8 @@
   const RPM = 33.333;
   const RAD_PER_SEC = (RPM / 60) * 2 * Math.PI;
   const PLATTER_SPINUP_MS = 2300;
-  const PLATTER_SPINDOWN_MS = 5000;
+  const PLATTER_SPINDOWN_MS = 1200;
+  const TONEARM_RETURN_MS = 1200;
   const TONEARM_CUE_MS = 1500;
   const TONEARM_DROP_MS = 700;
   const CENTER_X_NORM = 0.5;
@@ -273,10 +285,10 @@
       cueAnimDuration = 0;
       tonearmAngleJolt = 0;
       if (previousTonearmState === 'playing' && dragPreviewTime === null) {
-        // 播放中停止 → 慢速抬臂归位（约 5 秒）
+        // 播放中停止 → 先完整抬臂归位，再允许后续换面/换碟动画接管
         returnArmFromAngle = animatedArmAngle;
         returnAnimStart = performance.now();
-        returnAnimDuration = 5000;
+        returnAnimDuration = TONEARM_RETURN_MS;
         requestDraw();
       } else {
         returnAnimDuration = 0;
@@ -285,6 +297,13 @@
       }
     }
     previousTonearmState = tonearmState;
+  }
+
+  // swapAnim 变化时（尤其是从动画态恢复到 idle），确保 canvas 重绘碟面。
+  // 当转盘静止时 rAF 循环可能已停止，需手动触发一帧。
+  $: {
+    swapAnim;
+    requestDraw();
   }
 
   // 偏心孔的视觉模型：整张唱片以“一圈一次”的节奏围绕主轴轻微平移，
@@ -616,33 +635,35 @@
     } else {
       drawPlatterStaticHighlights(W, H);
     }
-    if (discShadowLayer) {
-      ctx.save();
-      ctx.translate(recordOffset.x, recordOffset.y);
-      ctx.drawImage(discShadowLayer, 0, 0, W, H);
-      ctx.restore();
-    } else {
-      drawDiscShadow(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y, turntable.discRadius);
-    }
+    if (swapAnim === 'idle') {
+      if (discShadowLayer) {
+        ctx.save();
+        ctx.translate(recordOffset.x, recordOffset.y);
+        ctx.drawImage(discShadowLayer, 0, 0, W, H);
+        ctx.restore();
+      } else {
+        drawDiscShadow(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y, turntable.discRadius);
+      }
 
-    if (discBaseLayer) {
-      ctx.save();
-      ctx.translate(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y);
-      ctx.rotate(platAngle);
-      ctx.drawImage(discBaseLayer, -turntable.cx, -turntable.cy, W, H);
-      ctx.restore();
-    } else {
-      drawDisc(W, H, { includeLighting: false });
-      if (side) drawTrackMarkers(W, H);
-    }
+      if (discBaseLayer) {
+        ctx.save();
+        ctx.translate(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y);
+        ctx.rotate(platAngle);
+        ctx.drawImage(discBaseLayer, -turntable.cx, -turntable.cy, W, H);
+        ctx.restore();
+      } else {
+        drawDisc(W, H, { includeLighting: false });
+        if (side) drawTrackMarkers(W, H);
+      }
 
-    if (discLightingLayer) {
-      ctx.save();
-      ctx.translate(recordOffset.x, recordOffset.y);
-      ctx.drawImage(discLightingLayer, 0, 0, W, H);
-      ctx.restore();
-    } else {
-      drawDiscLightingLayer(W, H);
+      if (discLightingLayer) {
+        ctx.save();
+        ctx.translate(recordOffset.x, recordOffset.y);
+        ctx.drawImage(discLightingLayer, 0, 0, W, H);
+        ctx.restore();
+      } else {
+        drawDiscLightingLayer(W, H);
+      }
     }
 
     if (spindleLayer) {
@@ -1377,7 +1398,7 @@
   }
 
   function drawDiscBody(discRadius: number) {
-    if (artworkMode === 'overlay' && coverUrl && coverImage) {
+    if (artworkMode === 'overlay' && discArtworkUrl && coverImage) {
       drawColoredVinylBody(discRadius);
       return;
     }
@@ -1700,8 +1721,8 @@
 
   function drawLabel(discRadius: number) {
     const labelR = discRadius * LABEL_RADIUS;
-    const hasCenteredCover = artworkMode === 'centered' && coverUrl && coverImage;
-    const hasOverlayCover = artworkMode === 'overlay' && coverUrl && coverImage;
+    const hasCenteredCover = artworkMode === 'centered' && discArtworkUrl && coverImage;
+    const hasOverlayCover = artworkMode === 'overlay' && discArtworkUrl && coverImage;
 
     if (hasCenteredCover) {
       drawClippedCoverImage(labelR);
@@ -1745,14 +1766,14 @@
     // 标签文字作为图面的一部分，跟随碟片一起旋转
     if (side) {
       ctx.save();
-      ctx.font = `bold ${labelR * 0.23}px "Courier New", monospace`;
+      ctx.font = `bold ${labelR * 0.09}px "Courier New", monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.letterSpacing = `${labelR * 0.04}px`;
+      ctx.letterSpacing = `${labelR * 0.018}px`;
       ctx.fillStyle = hasCenteredCover || hasOverlayCover
         ? 'rgba(255,240,210,0.72)'
         : 'rgba(255,240,210,0.82)';
-      ctx.fillText(`SIDE ${side.label}`, 0, labelR * 0.18, labelR * 1.5);
+      ctx.fillText(`SIDE ${side.label}`, 0, labelR * 0.4, labelR * 1.5);
       ctx.restore();
     }
 
@@ -2223,7 +2244,7 @@
       side?.totalDuration ?? 0,
       side?.tracks.map((track) => `${track.id}:${track.duration}`).join('|') ?? '',
       artworkMode,
-      coverUrl ?? '',
+      discArtworkUrl ?? '',
       coverImageVersion,
     ].join('::');
 
@@ -2231,6 +2252,7 @@
       discLayerCacheKey = nextDiscLayerKey;
       discBaseLayerDirty = true;
       discLightingLayerDirty = true;
+      requestDraw();
     }
   }
 
@@ -2239,7 +2261,7 @@
   }
 
   $: if (canvas) {
-    loadCoverImage(coverUrl);
+    loadCoverImage(discArtworkUrl);
   }
 
   onDestroy(() => {
@@ -2272,6 +2294,120 @@
       on:pointerleave={() => { if (!isDraggingNeedle) isNeedleHovering = false; }}
       title="拖动唱针头控制播放位置"
     ></canvas>
+
+    <!-- ── 切换动画覆盖层 ─────────────────────────────────────── -->
+    {#if swapAnim !== 'idle'}
+      <div
+        class="swap-overlay"
+        class:swap-overlay--swap={swapAnim === 'swap'}
+        class:swap-overlay--flip={swapAnim === 'flip'}
+        aria-hidden="true"
+      >
+        <!-- 封套（换碟时从顶部伸入） -->
+        {#if swapAnim === 'swap'}
+          <div class="swap-sleeve swap-sleeve--outgoing">
+            {#if swapFromCoverUrl}
+              <img src={swapFromCoverUrl} alt="" class="swap-sleeve-img" draggable="false" />
+            {/if}
+            <span class="swap-sleeve-paper" aria-hidden="true"></span>
+            <span class="swap-sleeve-opening" aria-hidden="true"></span>
+            <span class="swap-sleeve-gloss" aria-hidden="true"></span>
+          </div>
+
+          <div class="swap-sleeve swap-sleeve--incoming">
+            {#if swapToCoverUrl}
+              <img src={swapToCoverUrl} alt="" class="swap-sleeve-img" draggable="false" />
+            {/if}
+            <span class="swap-sleeve-paper" aria-hidden="true"></span>
+            <span class="swap-sleeve-opening" aria-hidden="true"></span>
+            <span class="swap-sleeve-gloss" aria-hidden="true"></span>
+          </div>
+        {/if}
+
+        <!-- 唱片圆盘（覆盖在 canvas 上，用于动画） -->
+        <div
+          class="swap-vinyl"
+          class:swap-vinyl--outgoing={swapAnim === 'swap'}
+        >
+          <span
+            class="swap-vinyl-face swap-vinyl-face--front"
+            class:swap-vinyl-face--overlay-art={artworkMode === 'overlay' && !!swapFromDiscArtworkUrl}
+            aria-hidden="true"
+          >
+            {#if artworkMode === 'overlay' && swapFromDiscArtworkUrl}
+              <img src={swapFromDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--base" draggable="false" />
+              <img src={swapFromDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--soft" draggable="false" />
+              <span class="swap-vinyl-body-resin" aria-hidden="true"></span>
+            {/if}
+            <span class="swap-vinyl-grooves" aria-hidden="true"></span>
+            <span class="swap-vinyl-label" aria-hidden="true">
+              {#if artworkMode === 'centered' && swapFromDiscArtworkUrl}
+                <img src={swapFromDiscArtworkUrl} alt="" class="swap-vinyl-label-art" draggable="false" />
+              {/if}
+              <span class="swap-vinyl-label-shade" aria-hidden="true"></span>
+              {#if swapFromSideLabel}
+                <span class="swap-vinyl-side-text" aria-hidden="true">SIDE {swapFromSideLabel}</span>
+              {/if}
+            </span>
+            <span class="swap-vinyl-spindle" aria-hidden="true"></span>
+            <span class="swap-vinyl-sheen" aria-hidden="true"></span>
+          </span>
+          {#if swapAnim === 'flip'}
+            <span
+              class="swap-vinyl-face swap-vinyl-face--back"
+              class:swap-vinyl-face--overlay-art={artworkMode === 'overlay' && !!swapToDiscArtworkUrl}
+              aria-hidden="true"
+            >
+              {#if artworkMode === 'overlay' && swapToDiscArtworkUrl}
+                <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--base" draggable="false" />
+                <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--soft" draggable="false" />
+                <span class="swap-vinyl-body-resin" aria-hidden="true"></span>
+              {/if}
+              <span class="swap-vinyl-grooves" aria-hidden="true"></span>
+              <span class="swap-vinyl-label" aria-hidden="true">
+                {#if artworkMode === 'centered' && swapToDiscArtworkUrl}
+                  <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-label-art" draggable="false" />
+                {/if}
+                <span class="swap-vinyl-label-shade" aria-hidden="true"></span>
+                {#if swapToSideLabel}
+                  <span class="swap-vinyl-side-text" aria-hidden="true">SIDE {swapToSideLabel}</span>
+                {/if}
+              </span>
+              <span class="swap-vinyl-spindle" aria-hidden="true"></span>
+              <span class="swap-vinyl-sheen" aria-hidden="true"></span>
+            </span>
+          {/if}
+        </div>
+
+        {#if swapAnim === 'swap'}
+          <div class="swap-vinyl swap-vinyl--incoming">
+            <span
+              class="swap-vinyl-face swap-vinyl-face--front"
+              class:swap-vinyl-face--overlay-art={artworkMode === 'overlay' && !!swapToDiscArtworkUrl}
+              aria-hidden="true"
+            >
+              {#if artworkMode === 'overlay' && swapToDiscArtworkUrl}
+                <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--base" draggable="false" />
+                <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--soft" draggable="false" />
+                <span class="swap-vinyl-body-resin" aria-hidden="true"></span>
+              {/if}
+              <span class="swap-vinyl-grooves" aria-hidden="true"></span>
+              <span class="swap-vinyl-label" aria-hidden="true">
+                {#if artworkMode === 'centered' && swapToDiscArtworkUrl}
+                  <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-label-art" draggable="false" />
+                {/if}
+                <span class="swap-vinyl-label-shade" aria-hidden="true"></span>
+                {#if swapToSideLabel}
+                  <span class="swap-vinyl-side-text" aria-hidden="true">SIDE {swapToSideLabel}</span>
+                {/if}
+              </span>
+              <span class="swap-vinyl-spindle" aria-hidden="true"></span>
+              <span class="swap-vinyl-sheen" aria-hidden="true"></span>
+            </span>
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     <div class="machine-front-controls">
       <button
@@ -2562,6 +2698,452 @@
     text-shadow:
       0 0 7px rgba(255, 208, 130, 0.42),
       0 0 16px rgba(255, 208, 130, 0.16);
+  }
+
+  /* ════════════════════════════════════════════════════════════════
+     切换动画覆盖层
+     ────────────────────────────────────────────────────────────────
+     定位基准（归一化来自 Turntable.svelte canvas 常量）：
+       盘片圆心    CENTER_X=50%  CENTER_Y=46.2%
+       盘片半径    DISC_RADIUS=38.2%
+       标签半径    LABEL_RADIUS=0.35 → 占盘片直径 35%
+  ════════════════════════════════════════════════════════════════ */
+
+  .swap-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 20;
+    overflow: hidden;
+  }
+
+  /* ── 封套 ──────────────────────────────────────────────────── */
+  /*
+   * 与唱片圆盘完全同尺寸、同位置（left=11.8% top=8% width=76.4%）。
+   * 动画通过 translateY 控制入场 / 离场；
+   * swap-overlay overflow:hidden 负责裁切顶部，使封套仅露出下半段。
+   *
+   * 静止帧（translateY(-62%)）时：
+   *   封套底边 = 8% + 76.4% − 62%×76.4% = 37%
+   *   约 48% 的封套（下半部分）在帧内可见。
+   */
+  .swap-sleeve {
+    position: absolute;
+    left: 11.8%;
+    top: 8%;
+    width: 76.4%;
+    aspect-ratio: 1;
+    z-index: 2;
+    border-radius: 5px;
+    overflow: hidden;
+    background: linear-gradient(155deg, #ece1c5 0%, #ddd1b0 100%);
+    box-shadow:
+      inset 0 0 0 6px rgba(234, 222, 196, 0.48),
+      0 0 0 1.5px rgba(72, 46, 14, 0.20),
+      0 22px 64px rgba(4, 2, 0, 0.62);
+    transform: translateY(-110%);
+    opacity: 0;
+  }
+
+  .swap-sleeve--outgoing {
+    z-index: 6;
+  }
+
+  .swap-sleeve--incoming {
+    z-index: 5;
+  }
+
+  .swap-sleeve-img {
+    position: absolute;
+    inset: 6px;
+    width: calc(100% - 12px);
+    height: calc(100% - 12px);
+    object-fit: cover;
+    border-radius: 3px;
+    display: block;
+    user-select: none;
+    transform: rotate(180deg);
+    transform-origin: center;
+  }
+
+  /* 纸板横纹 */
+  .swap-sleeve-paper {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      180deg,
+      rgba(100, 72, 34, 0.028) 0px,
+      rgba(100, 72, 34, 0.028) 1px,
+      transparent 1px,
+      transparent 5px
+    );
+  }
+
+  /* 底部开口阴影（唱片从下方插入的入口边缘） */
+  .swap-sleeve-opening {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 12%;
+    z-index: 3;
+    pointer-events: none;
+    background: linear-gradient(0deg, rgba(12, 6, 1, 0.32) 0%, transparent 100%);
+  }
+
+  /* 塑封高光 */
+  .swap-sleeve-gloss {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    pointer-events: none;
+    background:
+      linear-gradient(
+        140deg,
+        rgba(255, 255, 255, 0.18) 0%,
+        rgba(255, 255, 255, 0.04) 26%,
+        transparent 46%
+      ),
+      linear-gradient(
+        320deg,
+        rgba(0, 0, 0, 0.06) 0%,
+        transparent 38%
+      );
+  }
+
+  /* ── 黑胶唱片 ──────────────────────────────────────────────── */
+  /*
+   * 与 canvas 中的盘片对齐：
+   *   left = 50% − 38.2% = 11.8%
+   *   top  = 46.2% − 38.2% = 8%
+   *   width/height = 76.4%
+   */
+  .swap-vinyl {
+    position: absolute;
+    left: 11.8%;
+    top: 8%;
+    width: 76.4%;
+    aspect-ratio: 1;
+    z-index: 1;
+    pointer-events: none;
+    transform-style: preserve-3d;
+    transform-origin: 50% 50%;
+  }
+
+  .swap-vinyl--outgoing {
+    z-index: 4;
+  }
+
+  .swap-vinyl--incoming {
+    z-index: 3;
+    opacity: 0;
+  }
+
+  .swap-vinyl-face {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 36% 34%, #2e2c26, #18160f 36%, #0d0b08 100%);
+    box-shadow: 0 14px 48px rgba(0, 0, 0, 0.72);
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+  }
+
+  .swap-vinyl-face--overlay-art {
+    background:
+      radial-gradient(circle at 36% 34%, #24211d, #14110d 38%, #0a0806 100%);
+  }
+
+  .swap-overlay--swap .swap-vinyl-face {
+    box-shadow: none;
+  }
+
+  .swap-vinyl-face--back {
+    transform: rotateX(180deg);
+  }
+
+  /* 黑胶纹路（模拟刻槽高频反光） */
+  .swap-vinyl-grooves {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background:
+      repeating-radial-gradient(
+        circle at center,
+        rgba(255, 244, 216, 0) 0%,
+        rgba(255, 244, 216, 0) 0.72%,
+        rgba(255, 244, 216, 0.044) 0.74%,
+        rgba(255, 244, 216, 0.044) 0.86%
+      );
+    -webkit-mask-image: radial-gradient(
+      circle at center,
+      transparent 0%,
+      transparent 41.5%,
+      #000 43%,
+      #000 96.8%,
+      transparent 98.6%
+    );
+    mask-image: radial-gradient(
+      circle at center,
+      transparent 0%,
+      transparent 41.5%,
+      #000 43%,
+      #000 96.8%,
+      transparent 98.6%
+    );
+    opacity: 0.9;
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  .swap-vinyl-grooves::before,
+  .swap-vinyl-grooves::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    pointer-events: none;
+  }
+
+  .swap-vinyl-grooves::before {
+    background:
+      radial-gradient(
+        circle at center,
+        transparent 0%,
+        transparent 34.5%,
+        rgba(255, 242, 205, 0.055) 35.1%,
+        transparent 35.8%
+      ),
+      radial-gradient(
+        circle at center,
+        transparent 0%,
+        transparent 41.6%,
+        rgba(255, 240, 205, 0.07) 42.2%,
+        transparent 42.8%
+      ),
+      radial-gradient(
+        circle at center,
+        transparent 0%,
+        transparent 47.2%,
+        rgba(255, 236, 196, 0.03) 47.7%,
+        transparent 48.1%
+      );
+    opacity: 0.9;
+    mix-blend-mode: screen;
+  }
+
+  .swap-vinyl-grooves::after {
+    background:
+      radial-gradient(
+        circle at center,
+        transparent 0%,
+        transparent 83.6%,
+        rgba(255, 246, 222, 0.06) 85.1%,
+        rgba(255, 246, 222, 0.018) 88%,
+        transparent 92%
+      ),
+      radial-gradient(
+        circle at 34% 28%,
+        rgba(255, 248, 228, 0.07) 0%,
+        rgba(255, 248, 228, 0.018) 18%,
+        transparent 42%
+      );
+    opacity: 0.92;
+    mix-blend-mode: screen;
+  }
+
+  .swap-vinyl-body-art {
+    position: absolute;
+    inset: -7%;
+    width: 114%;
+    height: 114%;
+    object-fit: cover;
+    border-radius: 50%;
+    pointer-events: none;
+  }
+
+  .swap-vinyl-body-art--base {
+    z-index: 0;
+    opacity: 0.82;
+    filter: blur(18px) saturate(1.18) contrast(1.05) brightness(0.82);
+    mix-blend-mode: screen;
+  }
+
+  .swap-vinyl-body-art--soft {
+    z-index: 1;
+    opacity: 0.28;
+    filter: blur(4px) saturate(1.3) contrast(1.08) brightness(0.88);
+    mix-blend-mode: soft-light;
+  }
+
+  .swap-vinyl-body-resin {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 50% 50%, rgba(10, 8, 7, 0.28) 0%, rgba(10, 8, 7, 0.16) 26%, rgba(10, 8, 7, 0) 41%),
+      radial-gradient(circle at 50% 50%, rgba(255, 246, 225, 0) 58%, rgba(255, 246, 225, 0.035) 84%, rgba(0, 0, 0, 0.18) 100%),
+      radial-gradient(circle at 32% 28%, rgba(255, 250, 238, 0.06), rgba(255, 250, 238, 0) 40%);
+    pointer-events: none;
+  }
+
+  /* 标签区（LABEL_RADIUS = 0.35 → 直径占唱片 35%） */
+  .swap-vinyl-label {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 35%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    overflow: hidden;
+    background: radial-gradient(circle at 50% 36%, #c44030, #7a2010 100%);
+    box-shadow: inset 0 0 0 1px rgba(255, 220, 180, 0.14);
+    z-index: 3;
+  }
+
+  .swap-vinyl-face--overlay-art .swap-vinyl-label {
+    background: radial-gradient(circle at 50% 36%, rgba(22, 18, 16, 0.72), rgba(10, 8, 7, 0.92) 100%);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 240, 210, 0.12),
+      0 0 0 1px rgba(0, 0, 0, 0.22);
+  }
+
+  .swap-vinyl-label-art {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    opacity: 1;
+    display: block;
+  }
+
+  .swap-vinyl-label-shade {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 50%, rgba(0, 0, 0, 0.16), rgba(0, 0, 0, 0.38));
+  }
+
+  .swap-vinyl-side-text {
+    position: absolute;
+    left: 50%;
+    top: 68%;
+    transform: translateX(-50%);
+    font-family: "Courier New", monospace;
+    font-size: clamp(10px, 0.92vw, 15px);
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    color: rgba(255, 240, 210, 0.8);
+    text-shadow: 0 0 8px rgba(0, 0, 0, 0.42);
+    white-space: nowrap;
+  }
+
+  /* 中心孔 */
+  .swap-vinyl-spindle {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 2%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: #080608;
+    z-index: 5;
+  }
+
+  /* 碟面掠射高光 */
+  .swap-vinyl-sheen {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background:
+      conic-gradient(
+        from -55deg at 50% 50%,
+        transparent 0deg,
+        rgba(255, 248, 228, 0.07) 18deg,
+        transparent 40deg,
+        transparent 180deg,
+        rgba(255, 248, 228, 0.04) 198deg,
+        transparent 218deg
+      );
+    pointer-events: none;
+    z-index: 4;
+  }
+
+  /* ── 换碟动画（swap）──────────────────────────────────────── */
+  /*
+   * 封套（与唱片同尺寸）：从顶部滑入，translateY(-62%) 时
+   *   约 48% 的封套（下半部分）可见；驻留等待唱片插入后一起退出。
+   * 唱片：原位等待封套到位 → 浮起至相同 translateY(-62%) 位置
+   *   → 淡出（进入封套），封套随即退出。
+   * 总时长 2 200 ms
+   */
+  @keyframes sleeve-outgoing {
+    0%   { transform: translateY(-110%); opacity: 0; }
+    12%  { transform: translateY(-62%); opacity: 1; }
+    40%  { transform: translateY(-62%); opacity: 1; }
+    54%  { transform: translateY(-110%); opacity: 0; }
+    100% { transform: translateY(-110%); opacity: 0; }
+  }
+
+  @keyframes vinyl-outgoing {
+    0%   { transform: translateY(0) scale(1); opacity: 1; }
+    12%  { transform: translateY(0) scale(1); opacity: 1; }
+    26%  { transform: translateY(-30%) scale(1.02); opacity: 1; }
+    40%  { transform: translateY(-62%) scale(1); opacity: 1; }
+    52%  { transform: translateY(-110%) scale(0.98); opacity: 0; }
+    100% { transform: translateY(-110%) scale(0.98); opacity: 0; }
+  }
+
+  @keyframes sleeve-incoming {
+    0%   { transform: translateY(-110%); opacity: 0; }
+    46%  { transform: translateY(-110%); opacity: 0; }
+    60%  { transform: translateY(-62%); opacity: 1; }
+    88%  { transform: translateY(-62%); opacity: 1; }
+    100% { transform: translateY(-110%); opacity: 0; }
+  }
+
+  @keyframes vinyl-incoming {
+    0%   { transform: translateY(-110%) scale(0.98); opacity: 0; }
+    48%  { transform: translateY(-110%) scale(0.98); opacity: 0; }
+    62%  { transform: translateY(-62%) scale(1); opacity: 1; }
+    76%  { transform: translateY(-30%) scale(1.02); opacity: 1; }
+    90%  { transform: translateY(0) scale(1); opacity: 1; }
+    100% { transform: translateY(0) scale(1); opacity: 1; }
+  }
+
+  .swap-overlay--swap .swap-sleeve--outgoing {
+    animation: sleeve-outgoing 3s cubic-bezier(0.36, 0.07, 0.19, 0.97) forwards;
+  }
+
+  .swap-overlay--swap .swap-vinyl--outgoing {
+    animation: vinyl-outgoing 3s cubic-bezier(0.36, 0.07, 0.19, 0.97) forwards;
+  }
+
+  .swap-overlay--swap .swap-sleeve--incoming {
+    animation: sleeve-incoming 3s cubic-bezier(0.36, 0.07, 0.19, 0.97) forwards;
+  }
+
+  .swap-overlay--swap .swap-vinyl--incoming {
+    animation: vinyl-incoming 3s cubic-bezier(0.36, 0.07, 0.19, 0.97) forwards;
+  }
+
+  /* ── 翻面动画（flip）──────────────────────────────────────── */
+  /*
+   * 唱片浮起 → 中段边缘朝向（scaleX→0）→ 展示另一面 → 落回
+   * 最后淡出，露出 canvas 中已更新的盘面。
+   * 总时长 1 600 ms
+   */
+  @keyframes vinyl-flip-side {
+    0%   { transform: translateY(0)    perspective(720px) rotateX(0deg)   scale(1);    }
+    18%  { transform: translateY(-8%)  perspective(720px) rotateX(0deg)   scale(1.03); }
+    50%  { transform: translateY(-12%) perspective(720px) rotateX(92deg)  scale(1.02); }
+    82%  { transform: translateY(-7%)  perspective(720px) rotateX(180deg) scale(1.03); }
+    100% { transform: translateY(0)    perspective(720px) rotateX(180deg) scale(1);    }
+  }
+
+  .swap-overlay--flip .swap-vinyl {
+    animation: vinyl-flip-side 1.6s cubic-bezier(0.42, 0, 0.58, 1) forwards;
   }
 
 </style>
