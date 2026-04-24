@@ -67,6 +67,9 @@ Lofi Vinyl 是一个 **桌面优先** 的本地音乐库 + 黑胶唱机模拟器
 |------|------|----------|
 | `App.svelte` | **应用状态中心与交互编排层**：曲库加载、专辑选择、导入、保存、删除、编辑、切面、播放启动序列 | Turntable, vinylEngine, model, persistence, importAudio, Tauri window |
 | `lib/turntable/Turntable.svelte` | Canvas 2D 唱机渲染：唱盘启停、唱臂动画、落针拖拽、封面显示模式切换、点击/拖拽寻位；内部维护离屏缓存层以降低每帧重绘成本 | needleMapper |
+| `lib/cabinet/Cabinet.svelte` | 木质主机柜外壳与四象限布局 slot（唱盘、控制台、唱片架、信息区） | — |
+| `lib/cabinet/CabinetShelf.svelte` | 右上 Cabinet Mode 抽拉式唱片架：浏览模式、分类/艺人索引、横向滚动与键盘焦点管理 | ShelfAlbumItem |
+| `lib/cabinet/ShelfAlbumItem.svelte` | 单张唱片架项目：脊背、抽出封面预览、selected/focus/playing 槽位状态 | library/model |
 | `lib/turntable/needleMapper.ts` | 盘面几何与时间换算：点击位置 ↔ 面内时间、播放时间 ↔ 唱针半径 | — |
 | `lib/audio/vinylEngine.ts` | Web Audio 播放引擎：曲目 buffer 缓存、指定时间起播、自动续播、wow/flutter、底噪、爆裂声 | albumSplitter (`resolveTrackAtTime`) |
 | `lib/audio/albumSplitter.ts` | 曲目自动分面、从二维 side 数据构建播放态 Album、根据面内时间定位曲目 | types |

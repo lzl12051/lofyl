@@ -4,17 +4,22 @@
     getAlbumDuration,
     getSideDuration,
   } from "./model";
-  import type { Album, LibraryAlbum } from "../types";
+  import type { LibraryAlbum } from "../types";
+
+  type WorkshopMode = "home" | "import" | "edit";
 
   export let album: LibraryAlbum | null = null;
-  export let playbackAlbum: Album | null = null;
+  export let albums: LibraryAlbum[] = [];
+  export let mode: WorkshopMode = "home";
+  export let editingAlbumId: string | null = null;
   export let albumTitleDraft = "";
   export let isDesktopApp = false;
   export let isBusy = false;
   export let loadError = "";
   export let pendingDeleteAlbumId: string | null = null;
   export let pendingDeleteAlbumTitle = "";
-  export let onBack: () => void = () => {};
+  export let onModeChange: (mode: WorkshopMode) => void = () => {};
+  export let onSelectAlbum: (albumId: string) => void = () => {};
   export let onSaveTitle: () => void | Promise<void> = () => {};
   export let onImport: (
     kind: "files" | "folder",
@@ -36,9 +41,47 @@
   export let onClearCover: () => void | Promise<void> = () => {};
   export let onDiscArtSelected: (event: Event) => void | Promise<void> = () => {};
   export let onClearDiscArt: () => void | Promise<void> = () => {};
+  /** 当专辑分类发生变化时调用 */
+  export let onCategoriesChange: (categories: string[]) => void | Promise<void> = () => {};
+  /** 打开全局分类标签管理 */
+  export let onManageCategories: () => void = () => {};
+  /** 整个库里已有的所有分类名，用于自动补全建议 */
+  export let availableCategories: string[] = [];
 
   let coverFileInput: HTMLInputElement | null = null;
   let discArtFileInput: HTMLInputElement | null = null;
+  let categoryInput = '';
+  let showSuggestions = false;
+
+  $: currentCategories = album?.categories ?? [];
+  $: suggestions = availableCategories
+    .filter((c) => !currentCategories.includes(c) && c.toLowerCase().includes(categoryInput.toLowerCase()))
+    .slice(0, 8);
+
+  function addCategory(name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || currentCategories.includes(trimmed)) {
+      categoryInput = '';
+      showSuggestions = false;
+      return;
+    }
+    void onCategoriesChange([...currentCategories, trimmed]);
+    categoryInput = '';
+    showSuggestions = false;
+  }
+
+  function removeCategory(name: string) {
+    void onCategoriesChange(currentCategories.filter((c) => c !== name));
+  }
+
+  function handleCategoryKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addCategory(categoryInput);
+    } else if (e.key === 'Escape') {
+      showSuggestions = false;
+    }
+  }
 
   function getSideLabel(sideIndex: number): string {
     return String.fromCharCode(65 + sideIndex);
@@ -59,51 +102,203 @@
 
   <div class="ws-scroll">
 
-    <!-- 页头 -->
-    <header class="ws-head">
-      <div class="ws-head-top">
-        <span class="eyebrow">Album Workshop</span>
-        <button class="link-btn" type="button" on:click={onBack}>← 返回播放台</button>
-      </div>
-      <h1>专辑管理</h1>
-      <div class="head-rule"></div>
-    </header>
+    {#if mode !== "home"}
+      <header class="ws-head">
+        <div class="mode-tabs" role="tablist" aria-label="专辑管理模式">
+          <button
+            type="button"
+            role="tab"
+            aria-selected="false"
+            on:click={() => onModeChange("home")}
+          >管理首页</button>
+          <button
+            class:active={mode === "import"}
+            type="button"
+            role="tab"
+            aria-selected={mode === "import"}
+            on:click={() => onModeChange("import")}
+          >制作新专辑</button>
+          <button
+            class:active={mode === "edit"}
+            type="button"
+            role="tab"
+            aria-selected={mode === "edit"}
+            disabled={albums.length === 0}
+            on:click={() => onModeChange("edit")}
+          >编辑现有专辑</button>
+        </div>
+      </header>
+    {:else}
+      <div class="ws-head-spacer" aria-hidden="true"></div>
+    {/if}
 
     {#if loadError}
       <p class="error-line">{loadError}</p>
     {/if}
 
+    {#if mode === "home"}
+      <section class="manager-home" aria-label="管理专辑首页">
+        <button class="manager-card manager-card--primary" type="button" on:click={() => onModeChange("import")}>
+          <span class="manager-mark">NEW</span>
+          <span class="manager-title">制作新专辑</span>
+          <span class="manager-copy">导入音频文件或文件夹，自动整理曲面并生成可播放的黑胶专辑。</span>
+          <span class="manager-action">开始制作 <span>→</span></span>
+        </button>
+
+        <button
+          class="manager-card"
+          type="button"
+          disabled={albums.length === 0}
+          on:click={() => onModeChange("edit")}
+        >
+          <span class="manager-mark">{albums.length} ALBUMS</span>
+          <span class="manager-title">编辑现有专辑</span>
+          <span class="manager-copy">调整专辑名称、分类、封面、盘面图和曲目顺序。</span>
+          <span class="manager-action">{albums.length === 0 ? "暂无专辑" : "选择专辑"} <span>→</span></span>
+        </button>
+
+        <button
+          class="manager-card manager-card--tags"
+          type="button"
+          on:click={onManageCategories}
+        >
+          <span class="manager-mark">{availableCategories.length} TAGS</span>
+          <span class="manager-title">管理标签分类</span>
+          <span class="manager-copy">重命名分类、删除分类，或从某个分类中移除不需要的专辑。</span>
+          <span class="manager-action">打开标签管理 <span>→</span></span>
+        </button>
+      </section>
+
+      {#if albums.length > 0}
+        <section class="ws-section ws-section--compact">
+          <div class="section-head">
+            <span class="eyebrow">最近专辑</span>
+            <span class="section-rule"></span>
+          </div>
+          <div class="album-switcher album-switcher--grid" aria-label="选择要编辑的专辑">
+            {#each albums.slice(0, 6) as item}
+              <button
+                class:active={item.id === editingAlbumId}
+                type="button"
+                on:click={() => onSelectAlbum(item.id)}
+              >
+                <span class="switch-cover">
+                  {#if item.coverUrl}
+                    <img src={item.coverUrl} alt="" />
+                  {:else}
+                    <span>{item.title.trim()[0] ?? "L"}</span>
+                  {/if}
+                </span>
+                <span class="switch-meta">
+                  <strong>{item.title}</strong>
+                  <em>{countAlbumTracks(item)} 首 · {item.sides.length} 面</em>
+                </span>
+              </button>
+            {/each}
+          </div>
+        </section>
+      {/if}
+    {/if}
+
     <!-- 导入 -->
-    {#if isDesktopApp}
+    {#if mode === "import"}
       <section class="ws-section">
         <div class="section-head">
-          <span class="eyebrow">导入素材</span>
+          <span class="eyebrow">制作新专辑</span>
           <span class="section-rule"></span>
         </div>
-        <p class="section-lead">新建专辑，自动按碟面时长分配 Side A / B / C / D。</p>
-        <div class="import-grid">
-          <button class="import-tile" type="button" disabled={isBusy}
-            on:click={() => void onImport("files", "new")}>
-            <span class="import-tile-label">选择文件</span>
-            <span class="import-tile-hint">单个或多个音频文件</span>
-            <span class="import-tile-arrow">→</span>
-          </button>
-          <button class="import-tile" type="button" disabled={isBusy}
-            on:click={() => void onImport("folder", "new")}>
-            <span class="import-tile-label">选择文件夹</span>
-            <span class="import-tile-hint">导入整个文件夹</span>
-            <span class="import-tile-arrow">→</span>
-          </button>
+        {#if isDesktopApp}
+          <p class="section-lead">选择音频素材后会新建专辑，并自动按碟面时长分配 Side A / B / C / D。导入完成后直接进入编辑。</p>
+          <div class="import-grid">
+            <button class="import-tile" type="button" disabled={isBusy}
+              on:click={() => void onImport("files", "new")}>
+              <span class="import-tile-label">选择文件</span>
+              <span class="import-tile-hint">单个或多个音频文件</span>
+              <span class="import-tile-arrow">→</span>
+            </button>
+            <button class="import-tile" type="button" disabled={isBusy}
+              on:click={() => void onImport("folder", "new")}>
+              <span class="import-tile-label">选择文件夹</span>
+              <span class="import-tile-hint">导入整个文件夹</span>
+              <span class="import-tile-arrow">→</span>
+            </button>
+          </div>
+        {:else}
+          <p class="section-lead">桌面版本支持从本机导入音频文件。</p>
+        {/if}
+      </section>
+
+      {#if albums.length > 0}
+        <section class="ws-section">
+          <div class="section-head">
+            <span class="eyebrow">已有专辑</span>
+            <span class="section-rule"></span>
+          </div>
+          <div class="album-switcher album-switcher--grid" aria-label="选择要编辑的专辑">
+            {#each albums as item}
+              <button
+                class:active={item.id === editingAlbumId}
+                type="button"
+                on:click={() => onSelectAlbum(item.id)}
+              >
+                <span class="switch-cover">
+                  {#if item.coverUrl}
+                    <img src={item.coverUrl} alt="" />
+                  {:else}
+                    <span>{item.title.trim()[0] ?? "L"}</span>
+                  {/if}
+                </span>
+                <span class="switch-meta">
+                  <strong>{item.title}</strong>
+                  <em>{countAlbumTracks(item)} 首 · {item.sides.length} 面</em>
+                </span>
+              </button>
+            {/each}
+          </div>
+        </section>
+      {/if}
+    {/if}
+
+    {#if mode === "edit"}
+      <section class="ws-section">
+        <div class="section-head">
+          <span class="eyebrow">编辑现有专辑</span>
+          <span class="section-rule"></span>
         </div>
+        {#if albums.length > 0}
+          <div class="album-switcher album-switcher--grid" aria-label="切换正在编辑的专辑">
+            {#each albums as item}
+              <button
+                class:active={item.id === editingAlbumId}
+                type="button"
+                on:click={() => onSelectAlbum(item.id)}
+              >
+                <span class="switch-cover">
+                  {#if item.coverUrl}
+                    <img src={item.coverUrl} alt="" />
+                  {:else}
+                    <span>{item.title.trim()[0] ?? "L"}</span>
+                  {/if}
+                </span>
+                <span class="switch-meta">
+                  <strong>{item.title}</strong>
+                  <em>{countAlbumTracks(item)} 首 · {item.sides.length} 面</em>
+                </span>
+              </button>
+            {/each}
+          </div>
+        {:else}
+          <p class="section-lead">还没有可编辑的专辑，请先导入音频创建专辑。</p>
+        {/if}
       </section>
     {/if}
 
-    {#if album}
+    {#if mode === "edit" && album}
 
       <!-- 当前专辑 -->
       <section class="ws-section">
         <div class="section-head">
-          <span class="eyebrow">当前专辑</span>
+          <span class="eyebrow">正在编辑</span>
           <span class="section-rule"></span>
         </div>
 
@@ -142,6 +337,44 @@
                   placeholder="专辑名称" on:keydown={handleTitleKeydown} />
                 <button class="stamp-btn" type="button" disabled={isBusy}
                   on:click={() => void onSaveTitle()}>保存</button>
+              </div>
+            </div>
+
+            <!-- 分类标签 -->
+            <div class="field-row">
+              <div class="category-field-head">
+                <span class="field-eyebrow">分类标签</span>
+                <button class="link-btn" type="button" on:click={onManageCategories}>管理全部标签</button>
+              </div>
+              <div class="cat-editor">
+                {#each currentCategories as cat}
+                  <span class="cat-chip">
+                    {cat}
+                    <button class="cat-chip-remove" type="button" aria-label="移除 {cat}"
+                      on:click={() => removeCategory(cat)}>✕</button>
+                  </span>
+                {/each}
+                <div class="cat-input-wrap">
+                  <input
+                    class="cat-input"
+                    type="text"
+                    placeholder="输入分类后回车…"
+                    maxlength="32"
+                    bind:value={categoryInput}
+                    on:keydown={handleCategoryKeydown}
+                    on:focus={() => (showSuggestions = true)}
+                    on:blur={() => setTimeout(() => (showSuggestions = false), 150)}
+                  />
+                  {#if showSuggestions && suggestions.length > 0}
+                    <ul class="cat-suggestions">
+                      {#each suggestions as s}
+                        <li>
+                          <button type="button" on:click={() => addCategory(s)}>{s}</button>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
               </div>
             </div>
 
@@ -284,7 +517,7 @@
         <div class="danger-row">
           <p class="section-lead">删除后将清除专辑及其未被引用的曲目记录。</p>
           <button class="stamp-btn stamp-danger" type="button" disabled={isBusy}
-            on:click={onRequestDelete}>删除当前专辑</button>
+            on:click={onRequestDelete}>删除正在编辑的专辑</button>
         </div>
 
         {#if pendingDeleteAlbumId === album.id}
@@ -300,7 +533,7 @@
         {/if}
       </section>
 
-    {:else}
+    {:else if mode === "edit"}
       <section class="ws-section">
         <div class="section-head">
           <span class="eyebrow">当前状态</span>
@@ -410,36 +643,62 @@
 
   /* ── 页头 ──────────────────────────────────────────────────── */
   .ws-head {
-    padding-bottom: 20px;
-    margin-bottom: 28px;
-  }
-
-  .ws-head-top {
     display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 10px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 16px;
+    min-height: 42px;
+    margin-bottom: 24px;
   }
 
-  h1 {
-    font-size: calc(30px * var(--app-font-scale));
-    font-weight: 800;
-    color: #1e1005;
-    line-height: 1;
-    margin: 0 0 16px;
-    letter-spacing: -0.01em;
+  .ws-head-spacer {
+    height: 42px;
+    margin-bottom: 24px;
   }
 
-  .head-rule {
-    height: 2px;
-    background: #2b1905;
+  .mode-tabs {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid rgba(102, 69, 28, 0.26);
+    background: rgba(255, 248, 235, 0.48);
+  }
+
+  .mode-tabs button {
+    border: 0;
+    border-right: 1px solid rgba(102, 69, 28, 0.2);
+    background: transparent;
+    padding: 7px 12px;
+    color: #7a5a30;
+    cursor: pointer;
+    font-family: "Courier New", monospace;
+    font-size: calc(8px * var(--app-font-scale));
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .mode-tabs button:last-child {
+    border-right: 0;
+  }
+
+  .mode-tabs button.active {
+    background: rgba(102, 69, 28, 0.1);
+    color: #2b1905;
+    font-weight: 700;
+  }
+
+  .mode-tabs button:disabled {
+    opacity: 0.36;
+    cursor: default;
   }
 
   /* ── 分区 ──────────────────────────────────────────────────── */
   .ws-section {
     padding-bottom: 30px;
     margin-bottom: 2px;
+  }
+
+  .ws-section--compact {
+    padding-bottom: 10px;
   }
 
   .section-head {
@@ -460,6 +719,93 @@
     color: #7a5a30;
     line-height: 1.65;
     margin: 0 0 16px;
+  }
+
+  /* ── 管理首页 ──────────────────────────────────────────────── */
+  .manager-home {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    margin-bottom: 28px;
+  }
+
+  .manager-card {
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;
+    gap: 12px;
+    min-height: 220px;
+    border: 1px solid rgba(102, 69, 28, 0.22);
+    border-radius: 8px;
+    background:
+      linear-gradient(180deg, rgba(255, 250, 240, 0.82), rgba(239, 224, 194, 0.72)),
+      linear-gradient(135deg, rgba(74, 46, 12, 0.08), transparent 58%);
+    padding: 22px;
+    color: #2b1905;
+    cursor: pointer;
+    text-align: left;
+    transition: transform 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+  }
+
+  .manager-card:hover:not(:disabled) {
+    transform: translateY(-2px);
+    border-color: rgba(102, 69, 28, 0.5);
+    background:
+      linear-gradient(180deg, rgba(255, 251, 244, 0.94), rgba(238, 220, 184, 0.82)),
+      linear-gradient(135deg, rgba(74, 46, 12, 0.1), transparent 58%);
+  }
+
+  .manager-card:disabled {
+    cursor: default;
+    opacity: 0.48;
+  }
+
+  .manager-card--primary {
+    border-color: rgba(74, 46, 12, 0.42);
+  }
+
+  .manager-card--tags {
+    min-height: 172px;
+    grid-column: 1 / -1;
+  }
+
+  .manager-mark {
+    width: fit-content;
+    border-bottom: 1px solid rgba(102, 69, 28, 0.32);
+    padding-bottom: 4px;
+    font-family: "Courier New", monospace;
+    font-size: calc(8px * var(--app-font-scale));
+    letter-spacing: 0.16em;
+    color: #9a7040;
+  }
+
+  .manager-title {
+    font-size: calc(20px * var(--app-font-scale));
+    font-weight: 800;
+    line-height: 1.12;
+    color: #1e1005;
+  }
+
+  .manager-copy {
+    max-width: 28em;
+    font-size: calc(10.5px * var(--app-font-scale));
+    line-height: 1.7;
+    color: #6b4a24;
+  }
+
+  .manager-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: "Courier New", monospace;
+    font-size: calc(8.5px * var(--app-font-scale));
+    letter-spacing: 0.16em;
+    color: #4a2e0c;
+    text-transform: uppercase;
+  }
+
+  .manager-action span {
+    font-size: calc(15px * var(--app-font-scale));
+    line-height: 1;
   }
 
   /* ── 导入网格 ──────────────────────────────────────────────── */
@@ -516,6 +862,110 @@
   .import-tile:hover:not(:disabled) .import-tile-arrow {
     transform: translateX(3px);
     color: rgba(102, 69, 28, 0.7);
+  }
+
+  .album-switcher {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(126, 94, 47, 0.24) transparent;
+  }
+
+  .album-switcher--grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    overflow: visible;
+    padding-bottom: 0;
+  }
+
+  .album-switcher::-webkit-scrollbar {
+    height: 5px;
+  }
+
+  .album-switcher::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .album-switcher::-webkit-scrollbar-thumb {
+    background: rgba(112, 79, 37, 0.2);
+    border-radius: 2px;
+  }
+
+  .album-switcher button {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr);
+    gap: 10px;
+    align-items: center;
+    min-width: 190px;
+    border: 1px solid rgba(102, 69, 28, 0.2);
+    background: transparent;
+    padding: 8px;
+    color: #2b1905;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .album-switcher--grid button {
+    min-width: 0;
+  }
+
+  .album-switcher button:hover:not(.active) {
+    background: rgba(102, 69, 28, 0.05);
+  }
+
+  .album-switcher button.active {
+    background: rgba(102, 69, 28, 0.1);
+    border-color: rgba(102, 69, 28, 0.45);
+  }
+
+  .switch-cover {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    aspect-ratio: 1;
+    overflow: hidden;
+    background: linear-gradient(155deg, #e4d8bc, #cfc09a);
+    box-shadow:
+      inset 0 0 0 1px rgba(80, 52, 18, 0.18),
+      2px 1px 0 rgba(58, 34, 10, 0.22);
+  }
+
+  .switch-cover img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .switch-cover span {
+    color: rgba(80, 52, 18, 0.42);
+    font-weight: 800;
+  }
+
+  .switch-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .switch-meta strong {
+    min-width: 0;
+    overflow: hidden;
+    color: #2b1905;
+    font-size: calc(10.5px * var(--app-font-scale));
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .switch-meta em {
+    color: #9a7040;
+    font-family: "Courier New", monospace;
+    font-size: calc(8px * var(--app-font-scale));
+    font-style: normal;
+    letter-spacing: 0.08em;
   }
 
   /* ── 专辑 masthead ────────────────────────────────────────── */
@@ -810,6 +1260,14 @@
     color: #9a7040;
   }
 
+  .category-field-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+    min-width: 0;
+  }
+
   .field-inline {
     display: flex;
     align-items: center;
@@ -1046,6 +1504,88 @@
     background: rgba(255, 245, 241, 0.8);
   }
 
+  /* ── 分类标签编辑器 ─────────────────────────────────────────── */
+  .cat-editor {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    background: rgba(255, 248, 235, 0.65);
+    border: 1px solid rgba(102, 69, 28, 0.25);
+    border-radius: 8px;
+    min-height: 38px;
+  }
+  .cat-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    background: linear-gradient(180deg, #d5a06b 0%, #b47f48 100%);
+    border-radius: 999px;
+    color: #3a2410;
+    font-family: "Noto Serif SC", serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .cat-chip-remove {
+    background: none;
+    border: none;
+    padding: 0;
+    margin-left: 2px;
+    color: #5a3818;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.7;
+  }
+  .cat-chip-remove:hover { opacity: 1; }
+  .cat-input-wrap {
+    position: relative;
+    flex: 1 1 120px;
+    min-width: 100px;
+  }
+  .cat-input {
+    width: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    font-family: "Noto Serif SC", serif;
+    font-size: 13px;
+    color: #4a3218;
+    padding: 2px 4px;
+  }
+  .cat-input::placeholder { color: rgba(90, 58, 31, 0.4); }
+  .cat-suggestions {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 160px;
+    background: #fdf6e3;
+    border: 1px solid rgba(102, 69, 28, 0.25);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+    list-style: none;
+    padding: 4px;
+    z-index: 10;
+  }
+  .cat-suggestions li button {
+    width: 100%;
+    text-align: left;
+    padding: 6px 10px;
+    background: none;
+    border: none;
+    border-radius: 5px;
+    font-family: "Noto Serif SC", serif;
+    font-size: 13px;
+    color: #4a3218;
+    cursor: pointer;
+  }
+  .cat-suggestions li button:hover {
+    background: rgba(201, 154, 91, 0.2);
+  }
+
   /* 无障碍隐藏 */
   .sr-only {
     position: absolute;
@@ -1059,12 +1599,16 @@
 
   /* ── 响应式 ─────────────────────────────────────────────────── */
   @media (max-width: 860px) {
+    .manager-home { grid-template-columns: 1fr; }
     .album-masthead { grid-template-columns: 80px 1fr; gap: 14px; }
-    .cover-thumb { width: 80px; }
     .art-grid { grid-template-columns: 1fr 1fr; }
   }
 
   @media (max-width: 620px) {
+    .ws-head { align-items: flex-start; flex-direction: column; }
+    .mode-tabs { width: 100%; overflow-x: auto; }
+    .mode-tabs button { flex: 1 0 auto; }
+    .manager-card { min-height: 180px; padding: 18px; }
     .import-grid { grid-template-columns: 1fr; }
     .import-tile { border-right: 0; border-bottom: 1px solid rgba(102,69,28,0.22); }
     .import-tile:last-child { border-bottom: 0; }

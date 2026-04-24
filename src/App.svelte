@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { fade, fly } from "svelte/transition";
+  import { quintOut } from "svelte/easing";
   import Turntable from "./lib/turntable/Turntable.svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
@@ -16,14 +18,24 @@
     renameLibraryAlbum,
     setLibraryAlbumCover,
     setLibraryAlbumDiscArt,
+    countAlbumTracks,
+    getAlbumDuration,
   } from "./lib/library/model";
   import {
     deleteLibraryAlbum,
+    getRecentlyPlayed,
     loadLibrary,
+    recordAlbumPlay,
     saveLibraryAlbum,
+    toggleFavoriteAlbum,
   } from "./lib/library/persistence";
   import AlbumWorkshop from "./lib/library/AlbumWorkshop.svelte";
-  import SidebarCrate from "./lib/library/SidebarCrate.svelte";
+  import Stage from "./lib/cabinet/Stage.svelte";
+  import Cabinet from "./lib/cabinet/Cabinet.svelte";
+  import Console from "./lib/cabinet/Console.svelte";
+  import CabinetShelf from "./lib/cabinet/CabinetShelf.svelte";
+  import CategoryManager from "./lib/cabinet/CategoryManager.svelte";
+  import { setAlbumCategories } from "./lib/library/model";
   import { VinylEngine } from "./lib/audio/vinylEngine";
   import type {
     Album,
@@ -34,6 +46,17 @@
   } from "./lib/types";
 
   let libraryAlbums: LibraryAlbum[] = [];
+  let recentAlbumIds: string[] = [];
+
+  $: favoriteAlbumIds = new Set(libraryAlbums.filter((a) => a.isFavorite).map((a) => a.id));
+
+  async function toggleFavorite(albumId: string) {
+    const nextFav = await toggleFavoriteAlbum(albumId);
+    libraryAlbums = libraryAlbums.map((a) =>
+      a.id === albumId ? { ...a, isFavorite: nextFav } : a,
+    );
+  }
+
   let selectedAlbumId: string | null = null;
   let playbackAlbum: Album | null = null;
   let engine: VinylEngine | null = null;
@@ -41,6 +64,7 @@
   let currentTime = 0;
   let isPlaying = false;
   let isPlatterSpinning = false;
+  let platterBrakeRate = 1;
   let isLoading = false;
   let isSavingLibrary = false;
   let loadError = "";
@@ -53,10 +77,70 @@
   let isSpectrumEnabled = true;
   let albumTitleDraft = "";
   let titleDraftAlbumId: string | null = null;
-  let libraryPanelVisible = true;
   let pendingDeleteAlbumId: string | null = null;
   let pendingDeleteAlbumTitle = "";
   let activeView: "player" | "workshop" = "player";
+  let workshopMode: "home" | "import" | "edit" = "home";
+  let workshopAlbumId: string | null = null;
+  let categoryManagerOpen = false;
+
+  // ── 分类相关 ──────────────────────────────────────────────────
+  $: availableCategories = [
+    ...new Set(libraryAlbums.flatMap((a) => a.categories ?? [])),
+  ].sort((a, b) => a.localeCompare(b, 'zh'));
+
+  async function handleCategoriesChange(albumId: string, categories: string[]) {
+    const album = libraryAlbums.find((a) => a.id === albumId);
+    if (!album) return;
+    await persistAlbum(setAlbumCategories(album, categories), {
+      selectForWorkshop: albumId === workshopAlbumId,
+    });
+  }
+
+  async function handleRenameCategory(oldName: string, newName: string) {
+    const affected = libraryAlbums.filter((a) => (a.categories ?? []).includes(oldName));
+    for (const album of affected) {
+      const updated = setAlbumCategories(album, [
+        ...(album.categories ?? []).filter((c) => c !== oldName),
+        newName,
+      ]);
+      await persistAlbum(updated);
+    }
+  }
+
+  async function handleDeleteCategory(name: string) {
+    const affected = libraryAlbums.filter((a) => (a.categories ?? []).includes(name));
+    for (const album of affected) {
+      await persistAlbum(setAlbumCategories(album, (album.categories ?? []).filter((c) => c !== name)));
+    }
+  }
+
+  async function handleRemoveAlbumFromCategory(albumId: string, category: string) {
+    const album = libraryAlbums.find((a) => a.id === albumId);
+    if (!album) return;
+    await persistAlbum(setAlbumCategories(album, (album.categories ?? []).filter((c) => c !== category)));
+  }
+
+  const VOLUME_STORAGE_KEY = "lofi-vinyl:volume";
+  function loadStoredVolume(): number {
+    try {
+      const raw = localStorage.getItem(VOLUME_STORAGE_KEY);
+      if (raw === null) return 0.8;
+      const v = Number(raw);
+      if (!Number.isFinite(v)) return 0.8;
+      return Math.max(0, Math.min(1, v));
+    } catch {
+      return 0.8;
+    }
+  }
+  let volume = loadStoredVolume();
+  function handleVolumeChange(v: number) {
+    volume = v;
+    engine?.setOutputGain(v);
+    try {
+      localStorage.setItem(VOLUME_STORAGE_KEY, String(v));
+    } catch {}
+  }
 
   // ── 唱机切换动画状态 ──────────────────────────────────────────
   let turntableSwapAnim: 'idle' | 'swap' | 'flip' = 'idle';
@@ -95,14 +179,23 @@
 
   $: selectedAlbum =
     libraryAlbums.find((album) => album.id === selectedAlbumId) ?? null;
+  $: workshopAlbum =
+    libraryAlbums.find((album) => album.id === workshopAlbumId) ??
+    (workshopMode === "edit" ? selectedAlbum : null);
   $: currentSide = playbackAlbum?.sides[currentSideIndex] ?? null;
+  $: isTransportActive =
+    isPlaying ||
+    isPlatterSpinning ||
+    tonearmState === "cueing" ||
+    tonearmState === "dropping" ||
+    tonearmState === "holding";
 
-  $: if ((selectedAlbum?.id ?? null) !== titleDraftAlbumId) {
-    albumTitleDraft = selectedAlbum?.title ?? "";
-    titleDraftAlbumId = selectedAlbum?.id ?? null;
+  $: if ((workshopAlbum?.id ?? null) !== titleDraftAlbumId) {
+    albumTitleDraft = workshopAlbum?.title ?? "";
+    titleDraftAlbumId = workshopAlbum?.id ?? null;
   }
 
-  $: if ((selectedAlbum?.id ?? null) !== pendingDeleteAlbumId) {
+  $: if ((workshopAlbum?.id ?? null) !== pendingDeleteAlbumId) {
     pendingDeleteAlbumId = null;
     pendingDeleteAlbumTitle = "";
   }
@@ -118,12 +211,20 @@
     });
   }
 
-  function replaceAlbum(updatedAlbum: LibraryAlbum) {
+  function replaceAlbum(
+    updatedAlbum: LibraryAlbum,
+    options: { selectForPlayback?: boolean; selectForWorkshop?: boolean } = {},
+  ) {
     const otherAlbums = libraryAlbums.filter(
       (album) => album.id !== updatedAlbum.id,
     );
     libraryAlbums = sortAlbums([updatedAlbum, ...otherAlbums]);
-    selectedAlbumId = updatedAlbum.id;
+    if (options.selectForPlayback) {
+      selectedAlbumId = updatedAlbum.id;
+    }
+    if (options.selectForWorkshop) {
+      workshopAlbumId = updatedAlbum.id;
+    }
   }
 
   function getAlbumById(albumId: string | null): LibraryAlbum | null {
@@ -139,6 +240,7 @@
     currentTime = 0;
     isPlaying = false;
     isPlatterSpinning = false;
+    platterBrakeRate = 1;
     tonearmState = "parked";
     manualSpinupStartedAt = null;
     resetMusicMeter();
@@ -178,6 +280,7 @@
     }
 
     engine = new VinylEngine();
+    engine.setOutputGain(volume);
     bindEngineCallbacks(engine);
     await engine.loadSide(playbackAlbum.sides[0]);
   }
@@ -189,7 +292,10 @@
     loadError = "";
 
     try {
-      libraryAlbums = sortAlbums(await loadLibrary());
+      [libraryAlbums, recentAlbumIds] = await Promise.all([
+        loadLibrary().then(sortAlbums),
+        getRecentlyPlayed(),
+      ]);
       selectedAlbumId = libraryAlbums[0]?.id ?? null;
       await syncSelectedAlbumToPlayer(selectedAlbumId);
     } catch (err) {
@@ -200,17 +306,26 @@
     }
   }
 
-  async function persistAlbum(updatedAlbum: LibraryAlbum) {
+  async function persistAlbum(
+    updatedAlbum: LibraryAlbum,
+    options: { selectForPlayback?: boolean; selectForWorkshop?: boolean } = {},
+  ) {
     isSavingLibrary = true;
     loadError = "";
 
     try {
+      const shouldSyncPlayback =
+        options.selectForPlayback === true || updatedAlbum.id === selectedAlbumId;
       const savedAlbum = await saveLibraryAlbum(updatedAlbum);
-      replaceAlbum(savedAlbum);
-      await syncSelectedAlbumToPlayer(savedAlbum.id);
+      replaceAlbum(savedAlbum, options);
+      if (shouldSyncPlayback) {
+        await syncSelectedAlbumToPlayer(savedAlbum.id);
+      }
+      return savedAlbum;
     } catch (err) {
       loadError = "保存失败：" + String(err);
       console.error(err);
+      return null;
     } finally {
       isSavingLibrary = false;
     }
@@ -231,12 +346,20 @@
 
       if (!prepared) return;
 
-      if (target === "new" || !selectedAlbum) {
-        await persistAlbum(createLibraryAlbumFromPreparedImport(prepared));
+      if (target === "new" || !workshopAlbum) {
+        const savedAlbum = await persistAlbum(
+          createLibraryAlbumFromPreparedImport(prepared),
+          { selectForPlayback: true, selectForWorkshop: true },
+        );
+        if (savedAlbum) {
+          workshopMode = "edit";
+        }
       } else {
         await persistAlbum(
-          appendPreparedImportToAlbum(selectedAlbum, prepared),
+          appendPreparedImportToAlbum(workshopAlbum, prepared),
+          { selectForWorkshop: true },
         );
+        workshopMode = "edit";
       }
     } catch (err) {
       loadError = "导入失败：" + String(err);
@@ -247,15 +370,17 @@
   }
 
   async function saveCurrentAlbumTitle() {
-    if (!selectedAlbum) return;
+    if (!workshopAlbum) return;
 
     const trimmedTitle = albumTitleDraft.trim();
-    if (!trimmedTitle || trimmedTitle === selectedAlbum.title) {
-      albumTitleDraft = selectedAlbum.title;
+    if (!trimmedTitle || trimmedTitle === workshopAlbum.title) {
+      albumTitleDraft = workshopAlbum.title;
       return;
     }
 
-    await persistAlbum(renameLibraryAlbum(selectedAlbum, trimmedTitle));
+    await persistAlbum(renameLibraryAlbum(workshopAlbum, trimmedTitle), {
+      selectForWorkshop: true,
+    });
   }
 
   function triggerTurntableAnim(
@@ -333,28 +458,42 @@
     await syncSelectedAlbumToPlayer(albumId);
   }
 
+  async function playAlbumById(albumId: string) {
+    if (isSwitchingSide || isTransportActive) return;
+    if (selectedAlbumId !== albumId) {
+      await selectAlbumById(albumId);
+    }
+    if (!engine || !currentSide || isTransportActive) return;
+    await beginPlaybackSequence();
+    void recordAlbumPlay(albumId).then(() => {
+      recentAlbumIds = [albumId, ...recentAlbumIds.filter((id) => id !== albumId)];
+    });
+  }
+
   async function moveTrack(
     sideIndex: number,
     trackIndex: number,
     direction: "up" | "down" | "left" | "right",
   ) {
-    if (!selectedAlbum) return;
+    if (!workshopAlbum) return;
     await persistAlbum(
-      moveTrackWithinAlbum(selectedAlbum, sideIndex, trackIndex, direction),
+      moveTrackWithinAlbum(workshopAlbum, sideIndex, trackIndex, direction),
+      { selectForWorkshop: true },
     );
   }
 
   async function removeTrack(sideIndex: number, trackIndex: number) {
-    if (!selectedAlbum) return;
+    if (!workshopAlbum) return;
     await persistAlbum(
-      removeTrackFromAlbum(selectedAlbum, sideIndex, trackIndex),
+      removeTrackFromAlbum(workshopAlbum, sideIndex, trackIndex),
+      { selectForWorkshop: true },
     );
   }
 
   function requestDeleteCurrentAlbum() {
-    if (!selectedAlbum) return;
-    pendingDeleteAlbumId = selectedAlbum.id;
-    pendingDeleteAlbumTitle = selectedAlbum.title;
+    if (!workshopAlbum) return;
+    pendingDeleteAlbumId = workshopAlbum.id;
+    pendingDeleteAlbumTitle = workshopAlbum.title;
   }
 
   function cancelDeleteCurrentAlbum() {
@@ -363,21 +502,25 @@
   }
 
   async function deleteCurrentAlbum() {
-    if (!selectedAlbum) return;
-    if (pendingDeleteAlbumId !== selectedAlbum.id) return;
+    if (!workshopAlbum) return;
+    if (pendingDeleteAlbumId !== workshopAlbum.id) return;
 
     isSavingLibrary = true;
     loadError = "";
 
     try {
-      const removedAlbumId = selectedAlbum.id;
+      const removedAlbumId = workshopAlbum.id;
       await deleteLibraryAlbum(removedAlbumId);
       libraryAlbums = libraryAlbums.filter(
         (album) => album.id !== removedAlbumId,
       );
-      selectedAlbumId = libraryAlbums[0]?.id ?? null;
+      if (selectedAlbumId === removedAlbumId) {
+        selectedAlbumId = libraryAlbums[0]?.id ?? null;
+        await syncSelectedAlbumToPlayer(selectedAlbumId);
+      }
+      workshopAlbumId = libraryAlbums[0]?.id ?? null;
+      workshopMode = "home";
       cancelDeleteCurrentAlbum();
-      await syncSelectedAlbumToPlayer(selectedAlbumId);
     } catch (err) {
       loadError = "删除失败：" + String(err);
       console.error(err);
@@ -386,12 +529,28 @@
     }
   }
 
-  function openWorkshop() {
+  function openWorkshop(
+    mode: "home" | "import" | "edit" = "home",
+    albumId: string | null = selectedAlbumId,
+  ) {
+    workshopMode = mode;
+    workshopAlbumId = mode === "edit" ? albumId : null;
     activeView = "workshop";
   }
 
   function closeWorkshop() {
     activeView = "player";
+  }
+
+  function selectWorkshopAlbum(albumId: string) {
+    workshopAlbumId = albumId;
+    workshopMode = "edit";
+  }
+
+  function handleGlobalKeydown(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    if (categoryManagerOpen) { categoryManagerOpen = false; return; }
+    if (activeView === "workshop") { closeWorkshop(); return; }
   }
 
   function readFileAsDataUrl(file: File): Promise<string> {
@@ -420,7 +579,7 @@
       failedMessage: string;
     },
   ) {
-    const album = selectedAlbum;
+    const album = workshopAlbum;
     if (!album) return;
 
     const input = event.currentTarget as HTMLInputElement | null;
@@ -435,7 +594,9 @@
 
     try {
       const imageUrl = await readFileAsDataUrl(file);
-      await persistAlbum(options.onSave(album, imageUrl));
+      await persistAlbum(options.onSave(album, imageUrl), {
+        selectForWorkshop: true,
+      });
     } catch (err) {
       loadError = options.failedMessage + String(err);
       console.error(err);
@@ -453,8 +614,10 @@
   }
 
   async function clearCustomCover() {
-    if (!selectedAlbum) return;
-    await persistAlbum(setLibraryAlbumCover(selectedAlbum));
+    if (!workshopAlbum) return;
+    await persistAlbum(setLibraryAlbumCover(workshopAlbum), {
+      selectForWorkshop: true,
+    });
   }
 
   async function handleCustomDiscArtSelected(event: Event) {
@@ -466,12 +629,10 @@
   }
 
   async function clearCustomDiscArt() {
-    if (!selectedAlbum) return;
-    await persistAlbum(setLibraryAlbumDiscArt(selectedAlbum));
-  }
-
-  function toggleLibraryPanel() {
-    libraryPanelVisible = !libraryPanelVisible;
+    if (!workshopAlbum) return;
+    await persistAlbum(setLibraryAlbumDiscArt(workshopAlbum), {
+      selectForWorkshop: true,
+    });
   }
 
 
@@ -513,6 +674,7 @@
     engine.stopLeadInNoise();
     isPlaying = false;
     isPlatterSpinning = false;
+    platterBrakeRate = 1;
     tonearmState = "parked";
     clearManualCueState();
     resetMusicMeter();
@@ -634,6 +796,7 @@
       engine.stopLeadInNoise();
       isPlaying = false;
       isPlatterSpinning = false;
+      platterBrakeRate = 1;
       tonearmState = "parked";
       clearManualCueState();
       resetMusicMeter();
@@ -649,6 +812,11 @@
     if (isPlaying) {
       await engine.playWithOptions(timeInSide, { keepNoise: true });
     }
+  }
+
+  function handlePlatterBrakeRateChange(rate: number) {
+    platterBrakeRate = Math.max(0, Math.min(1, rate));
+    engine?.setPlatterBrakeRate(platterBrakeRate);
   }
 
   async function switchSide(index: number) {
@@ -706,79 +874,176 @@
   });
 </script>
 
+<svelte:window on:keydown={handleGlobalKeydown} />
 <main class:desktop-overlay-shell={isDesktopApp}>
   {#if isDesktopApp}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="titlebar-drag-region" on:mousedown={onTitlebarMousedown}></div>
   {/if}
-  <div
-    class="studio"
-    class:collapsed-layout={!libraryPanelVisible}
-  >
-    <aside class="library-panel" class:collapsed={!libraryPanelVisible}>
-      {#if libraryPanelVisible}
-        <div class="library-shell">
-          <div class="panel-head library-marquee">
-            <div class="panel-title-block">
-              <div class="eyebrow">LOFI VINYL LIBRARY</div>
-              <h1 class="panel-title">LOFYL</h1>
-            </div>
 
-            <div class="panel-toolbar" aria-label="曲库控制">
-              <button
-                class="text-action"
-                type="button"
-                on:click={openWorkshop}
-              >
-                制作专辑
-              </button>
+  <Stage>
+    <Cabinet>
+      <!-- ========== 左上：唱盘 ========== -->
+      <div slot="turntable" class="turntable-host">
+        <Turntable
+          chromeless={true}
+          side={currentSide}
+          {currentTime}
+          {isPlaying}
+          {isPlatterSpinning}
+          {platterBrakeRate}
+          {tonearmState}
+          {musicMeterLevels}
+          {isSpectrumEnabled}
+          discArtworkUrl={playbackAlbum?.discArtUrl}
+          artworkMode={discArtworkMode}
+          swapAnim={turntableSwapAnim}
+          swapFromCoverUrl={turntableSwapFromCover}
+          swapToCoverUrl={turntableSwapToCover}
+          swapFromDiscArtworkUrl={turntableSwapFromDiscArt}
+          swapToDiscArtworkUrl={turntableSwapToDiscArt}
+          swapFromSideLabel={turntableSwapFromSideLabel}
+          swapToSideLabel={turntableSwapToSideLabel}
+          onArtworkModeChange={(mode) => {
+            discArtworkMode = mode;
+          }}
+          onToggleSpectrum={() => {
+            isSpectrumEnabled = !isSpectrumEnabled;
+          }}
+          onSeek={handleSeek}
+          onTogglePlay={togglePlay}
+          onNeedleDragStart={() => {
+            void beginManualCueSpinup();
+          }}
+          onNeedleDrop={(timeInSide) => {
+            if (isPlaying) return;
+            if (timeInSide === null) {
+              cancelManualCueInteraction();
+              return;
+            }
+            void beginPlaybackFromManualCue(timeInSide);
+          }}
+          onPlatterBrakeRateChange={handlePlatterBrakeRateChange}
+        />
+        <div class="turntable-art-toggle" role="group" aria-label="盘面图显示模式">
+          <button
+            class:active={discArtworkMode === "overlay"}
+            type="button"
+            on:click={() => {
+              discArtworkMode = "overlay";
+            }}
+          >DISC</button>
+          <button
+            class:active={discArtworkMode === "centered"}
+            type="button"
+            on:click={() => {
+              discArtworkMode = "centered";
+            }}
+          >LABEL</button>
+        </div>
+      </div>
 
-              <button
-                class="toggle-library-btn"
-                type="button"
-                on:click={toggleLibraryPanel}
-                aria-label="切换库面板"
-              >
-                收起
-              </button>
-            </div>
-          </div>
+      <!-- ========== 左下：控制台（VOLUME + Spectrum + 副控件） ========== -->
+      <div slot="console" class="console-host">
+        <Console
+          {volume}
+          {musicMeterLevels}
+          {isSpectrumEnabled}
+          {isTransportActive}
+          onVolumeChange={handleVolumeChange}
+          onToggleSpectrum={() => {
+            isSpectrumEnabled = !isSpectrumEnabled;
+          }}
+          onTogglePlay={togglePlay}
+        />
+      </div>
 
-          {#if activeView === "player" && loadError}
-            <p class="error">{loadError}</p>
-          {/if}
+      <!-- ========== 右上：唱片架 ========== -->
+      <div slot="shelf" class="shelf-host">
+        <CabinetShelf
+          albums={libraryAlbums}
+          {selectedAlbumId}
+          deckAlbumId={playbackAlbum?.id ?? null}
+          {isTransportActive}
+          {favoriteAlbumIds}
+          {recentAlbumIds}
+          onSelect={(albumId) => selectAlbumById(albumId)}
+          onPlayAlbum={(albumId) => playAlbumById(albumId)}
+          onOpenWorkshop={() => openWorkshop()}
+        />
+      </div>
 
-          <section class="section sidebar-crate-section">
-            {#if libraryAlbums.length === 0}
-              <p class="empty-state">先打开“制作专辑”，导入一张专辑。</p>
-            {:else}
-              <SidebarCrate
-                albums={libraryAlbums}
-                {selectedAlbumId}
-                onSelect={(albumId) => void selectAlbumById(albumId)}
-              />
-            {/if}
-          </section>
-
-          {#if selectedAlbum}
-            <section class="section library-section now-playing-section">
-              {#if playbackAlbum && currentSide}
-                <div class="side-sheet">
-                  <div class="side-sheet-head">
-                    <div class="section-label">当前盘面</div>
-                    <div class="selected-album-meta">
-                      Side {currentSide.label} · {currentSide.tracks.length} 首 ·
-                      {formatTime(currentSide.totalDuration)}
+      <!-- ========== 右下：信息 + 曲目 ========== -->
+      <div slot="info" class="info-host">
+        {#if selectedAlbum && playbackAlbum && currentSide}
+          <div class="paper liner-stack">
+            <section class="liner-panel album-card" aria-label="专辑信息">
+              <div class="album-card-top">
+                <div class="mini-cover">
+                  {#if selectedAlbum.coverUrl}
+                    <img src={selectedAlbum.coverUrl} alt="" />
+                  {:else}
+                    <span>{selectedAlbum.title.trim()[0] ?? "L"}</span>
+                  {/if}
+                </div>
+                <div class="meta-column">
+                  <div class="meta">
+                    <div class="title" title={selectedAlbum.title}>{selectedAlbum.title}</div>
+                    <div class="artist">{selectedAlbum.artist || "未署名艺人"}</div>
+                    <div class="tag-row">
+                      <div class="tag-row-left">
+                        {#if (selectedAlbum.categories ?? []).length > 0}
+                          <span class="genre-badge">{selectedAlbum.categories[0]}</span>
+                        {/if}
+                      </div>
+                      <button
+                        class="fav-star"
+                        class:active={favoriteAlbumIds.has(selectedAlbum.id)}
+                        type="button"
+                        on:click={() => toggleFavorite(selectedAlbum.id)}
+                        aria-pressed={favoriteAlbumIds.has(selectedAlbum.id)}
+                        aria-label={favoriteAlbumIds.has(selectedAlbum.id) ? "取消收藏" : "收藏"}
+                        title={favoriteAlbumIds.has(selectedAlbum.id) ? "取消收藏" : "收藏"}
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <polygon points="12 2.6 14.9 9.1 22 9.9 16.7 14.7 18.2 21.5 12 17.9 5.8 21.5 7.3 14.7 2 9.9 9.1 9.1" />
+                        </svg>
+                      </button>
                     </div>
                   </div>
+                  <div class="stat-stack" aria-label="专辑统计">
+                    <div class="album-stat">
+                      <span class="stat-label">曲目数量</span>
+                      <span class="stat-value">{countAlbumTracks(selectedAlbum)} 首</span>
+                    </div>
+                    <div class="album-stat">
+                      <span class="stat-label">唱片面数</span>
+                      <span class="stat-value">{playbackAlbum.sides.length} 面</span>
+                    </div>
+                    <div class="album-stat">
+                      <span class="stat-label">发行时间</span>
+                      <span class="stat-value">—</span>
+                    </div>
+                    <div class="album-stat">
+                      <span class="stat-label">总时长</span>
+                      <span class="stat-value">{formatTime(getAlbumDuration(selectedAlbum))}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
 
-                  <div class="sidebar-side-picker" aria-label="切换盘面">
+            <section class="liner-panel tracklist-paper" aria-label="曲目列表">
+              <div class="tl-head">
+                <span>曲目列表</span>
+                <div class="tl-controls">
+                  <div class="print-side-picker" aria-label="切换盘面">
                     {#each playbackAlbum.sides as side, index}
                       <button
-                        class="side-link"
+                        class="print-side-link"
                         class:active={index === currentSideIndex}
                         type="button"
-                        disabled={isSwitchingSide}
+                        disabled={isSwitchingSide || index === currentSideIndex}
                         on:click={() => void switchSide(index)}
                         aria-current={index === currentSideIndex ? "true" : undefined}
                       >
@@ -786,66 +1051,81 @@
                       </button>
                     {/each}
                   </div>
-
-                  <div class="sidebar-track-list">
-                    <div class="sidebar-track-list-head" aria-hidden="true">
-                      <span>Track</span>
-                      <span>Title</span>
-                      <span>Time</span>
-                    </div>
-                    {#each currentSide.tracks as track, index}
-                      <div
-                        class="sidebar-track"
-                        class:playing={isCurrentTrack(currentSide, index, currentTime)}
-                      >
-                        <span class="sidebar-track-num">{String(index + 1).padStart(2, "0")}</span>
-                        <span class="sidebar-track-title">{track.title}</span>
-                        <span class="sidebar-track-duration">{formatTime(track.duration)}</span>
-                      </div>
-                    {/each}
-                  </div>
+                  <span class="tl-status">{isPlaying ? "▶ 播放中" : "■ 已暂停"}</span>
                 </div>
-              {:else}
-                <p class="helper side-helper">当前专辑还没有可播放的盘面。</p>
-              {/if}
+              </div>
+              <div class="tracklist-scroll">
+                <div class="current-side-row">
+                  <span>{currentSide.label} 面</span>
+                  <span>{currentSide.tracks.length} 首 · {formatTime(currentSide.totalDuration)}</span>
+                </div>
+                {#each currentSide.tracks as track, index}
+                  <div
+                    class="track-row"
+                    class:playing={isCurrentTrack(currentSide, index, currentTime)}
+                    aria-current={isCurrentTrack(currentSide, index, currentTime) ? "true" : undefined}
+                  >
+                    <span class="track-led" aria-hidden="true"></span>
+                    <span class="track-num">{String(index + 1).padStart(2, "0")}</span>
+                    <span class="track-title">{track.title}</span>
+                    <span class="track-time">{formatTime(track.duration)}</span>
+                  </div>
+                {/each}
+              </div>
             </section>
-          {/if}
-        </div>
-      {:else}
-        <button
-          class="toggle-library-btn collapsed-toggle-btn"
-          type="button"
-          on:click={toggleLibraryPanel}
-          aria-label="切换库面板"
-        >
-          显示库
-        </button>
-      {/if}
-    </aside>
 
-    <section class="main-panel" class:workshop-mode={activeView === "workshop"}>
-      {#if isLoading || isSavingLibrary}
-        <div class="turntable-status-bar">
-          {#if isLoading}
-            <span class="status-pill">加载中</span>
-          {/if}
-          {#if isSavingLibrary}
-            <span class="status-pill">已写入</span>
-          {/if}
-        </div>
-      {/if}
+          </div>
+        {:else}
+          <div class="paper liner-stack liner-empty">
+            <p class="helper">请选择一张专辑。</p>
+          </div>
+        {/if}
+      </div>
 
-      {#if activeView === "workshop"}
+    </Cabinet>
+  </Stage>
+
+  <!-- Workshop Modal -->
+  {#if activeView === "workshop"}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="ws-backdrop"
+      transition:fade={{ duration: 220 }}
+      on:click={closeWorkshop}
+      on:keydown={(e) => e.key === 'Escape' && closeWorkshop()}
+      role="dialog"
+      tabindex="-1"
+      aria-modal="true"
+      aria-label="管理专辑"
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <div
+        class="ws-panel"
+        transition:fly={{ y: 40, duration: 320, easing: quintOut }}
+        on:click|stopPropagation
+      >
+        <button class="ws-close-btn" type="button" on:click={closeWorkshop} aria-label="关闭">✕</button>
         <AlbumWorkshop
-          album={selectedAlbum}
-          {playbackAlbum}
+          album={workshopAlbum}
+          albums={libraryAlbums}
+          mode={workshopMode}
+          editingAlbumId={workshopAlbum?.id ?? null}
           bind:albumTitleDraft
           {isDesktopApp}
           isBusy={isLoading || isSavingLibrary}
           {loadError}
           {pendingDeleteAlbumId}
           {pendingDeleteAlbumTitle}
-          onBack={closeWorkshop}
+          onModeChange={(mode) => {
+            workshopMode = mode;
+            if (mode === "edit" && !workshopAlbumId) {
+              workshopAlbumId = selectedAlbumId ?? libraryAlbums[0]?.id ?? null;
+            }
+            if (mode !== "edit") {
+              workshopAlbumId = null;
+            }
+          }}
+          onSelectAlbum={selectWorkshopAlbum}
           onSaveTitle={() => void saveCurrentAlbumTitle()}
           onImport={(kind, target) => void importAlbum(kind, target)}
           onRequestDelete={requestDeleteCurrentAlbum}
@@ -859,51 +1139,40 @@
           onClearCover={() => void clearCustomCover()}
           onDiscArtSelected={(event) => void handleCustomDiscArtSelected(event)}
           onClearDiscArt={() => void clearCustomDiscArt()}
+          {availableCategories}
+          onManageCategories={() => (categoryManagerOpen = true)}
+          onCategoriesChange={(cats) => {
+            if (workshopAlbum?.id) void handleCategoriesChange(workshopAlbum.id, cats);
+          }}
         />
-      {:else}
-        <div class="turntable-stage">
-          <Turntable
-            side={currentSide}
-            {currentTime}
-            {isPlaying}
-            {isPlatterSpinning}
-            {tonearmState}
-            {musicMeterLevels}
-            {isSpectrumEnabled}
-            discArtworkUrl={playbackAlbum?.discArtUrl}
-            artworkMode={discArtworkMode}
-            swapAnim={turntableSwapAnim}
-            swapFromCoverUrl={turntableSwapFromCover}
-            swapToCoverUrl={turntableSwapToCover}
-            swapFromDiscArtworkUrl={turntableSwapFromDiscArt}
-            swapToDiscArtworkUrl={turntableSwapToDiscArt}
-            swapFromSideLabel={turntableSwapFromSideLabel}
-            swapToSideLabel={turntableSwapToSideLabel}
-            onArtworkModeChange={(mode) => {
-              discArtworkMode = mode;
-            }}
-            onToggleSpectrum={() => {
-              isSpectrumEnabled = !isSpectrumEnabled;
-            }}
-            onSeek={handleSeek}
-            onTogglePlay={togglePlay}
-            onNeedleDragStart={() => {
-              void beginManualCueSpinup();
-            }}
-            onNeedleDrop={(timeInSide) => {
-              if (isPlaying) return;
-              if (timeInSide === null) {
-                cancelManualCueInteraction();
-                return;
-              }
-              void beginPlaybackFromManualCue(timeInSide);
-            }}
-          />
-        </div>
-      {/if}
-    </section>
-  </div>
+      </div>
+    </div>
+  {/if}
 
+  {#if categoryManagerOpen}
+    <CategoryManager
+      albums={libraryAlbums}
+      onClose={() => (categoryManagerOpen = false)}
+      onRenameCategory={(old, next) => void handleRenameCategory(old, next)}
+      onDeleteCategory={(name) => void handleDeleteCategory(name)}
+      onRemoveAlbumFromCategory={(id, cat) => void handleRemoveAlbumFromCategory(id, cat)}
+    />
+  {/if}
+
+  {#if isLoading || isSavingLibrary}
+    <div class="status-bar">
+      {#if isLoading}
+        <span class="status-pill">加载中</span>
+      {/if}
+      {#if isSavingLibrary}
+        <span class="status-pill">已写入</span>
+      {/if}
+    </div>
+  {/if}
+
+  {#if loadError}
+    <div class="error-toast">{loadError}</div>
+  {/if}
 </main>
 
 <style>
@@ -915,35 +1184,28 @@
 
   :global(body) {
     background: radial-gradient(
-        circle at top left,
-        rgba(255, 245, 221, 0.82),
-        transparent 34%
-      ),
-      linear-gradient(135deg, #ece2cf 0%, #dbc8a8 46%, #c6ae86 100%);
-    color: #2e1e0a;
-    font-family: Georgia, "Times New Roman", serif;
+      ellipse at 50% 40%,
+      #2a1c10 0%,
+      #0e0805 80%
+    );
+    color: #2a1e10;
+    font-family:
+      "Inter", "Noto Serif SC", Georgia, "Times New Roman", serif;
     overflow: hidden;
-  }
-
-  main {
-    width: 100vw;
     height: 100vh;
     height: 100dvh;
   }
 
-  main.desktop-overlay-shell .library-panel {
-    padding-top: 52px;
+  main {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
   }
 
-  main.desktop-overlay-shell .main-panel {
-    padding: 44px 0 0;
-    gap: 0;
-    border-radius: 0 10px 10px 0;
-  }
-
-  main.desktop-overlay-shell .turntable-status-bar {
-    top: 10px;
-    right: 18px;
+  main.desktop-overlay-shell {
+    padding-top: 28px; /* 让出标题栏拖拽区 */
   }
 
   .titlebar-drag-region {
@@ -951,467 +1213,634 @@
     top: 0;
     left: 0;
     right: 0;
-    height: 52px;
+    height: 28px;
     z-index: 9999;
   }
 
-  .studio {
-    display: grid;
-    grid-template-columns: minmax(288px, 320px) minmax(0, 1fr);
-    height: 100%;
-    min-width: 0;
+  /* Workshop panel 内：让 AlbumWorkshop 撑满并正确滚动 */
+  :global(.ws-panel .ws) {
+    width: 100%;
     min-height: 0;
   }
-
-  .studio.collapsed-layout {
-    grid-template-columns: minmax(60px, 80px) minmax(0, 1fr);
+  :global(.ws-panel .ws-scroll) {
+    padding-inline: 36px;
+    padding-bottom: 36px;
   }
 
-
-  .library-panel {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    padding: 20px 14px 14px 12px;
-    border-right: 1px solid rgba(99, 68, 30, 0.18);
-    background:
-      linear-gradient(180deg, rgba(253, 249, 241, 0.94), rgba(239, 226, 201, 0.92)),
-      repeating-linear-gradient(
-        180deg,
-        rgba(132, 95, 43, 0.03) 0,
-        rgba(132, 95, 43, 0.03) 1px,
-        transparent 1px,
-        transparent 32px
-      );
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
-    box-shadow:
-      inset -1px 0 0 rgba(85, 57, 24, 0.12),
-      12px 0 28px rgba(83, 53, 22, 0.08);
-  }
-
-  .library-panel.collapsed .library-shell {
-    display: none;
-  }
-
-  .library-panel.collapsed {
-    background: transparent;
-    border-right: none;
-    backdrop-filter: none;
-    align-items: center;
-    justify-content: flex-start;
-    padding: 12px 8px;
-  }
-
-  .toggle-library-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    white-space: nowrap;
-  }
-
-  .library-shell {
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-    min-width: 0;
-    min-height: 0;
-  }
-
-  .library-shell {
-    height: 100%;
-    overflow-y: auto;
-    gap: 18px;
-    padding-right: 8px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(126, 94, 47, 0.28) transparent;
-  }
-
-  .library-shell::-webkit-scrollbar {
-    width: 7px;
-  }
-
-  .library-shell::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .library-shell::-webkit-scrollbar-thumb {
-    background: rgba(112, 79, 37, 0.24);
-    border-radius: 999px;
-    border: 1px solid rgba(255, 247, 233, 0.36);
-  }
-
-  .library-shell::-webkit-scrollbar-thumb:hover {
-    background: rgba(112, 79, 37, 0.38);
-  }
-
-  .panel-head {
+  /* ── 唱盘 slot 内部 ── */
+  .turntable-host {
+    position: absolute;
+    inset: 0;
     display: flex;
     align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-    min-width: 0;
+    justify-content: center;
+    padding-top: 10px;
+    overflow: visible;
   }
-
-  .panel-head {
-    flex-direction: column;
-    align-items: stretch;
+  .turntable-host :global(.turntable-wrap) {
+    align-items: flex-start;
   }
-
-  .library-marquee {
-    gap: 8px;
-    padding: 0 0 16px;
-    border-bottom: 1px solid rgba(108, 76, 36, 0.24);
-  }
-
-  .turntable-status-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
+  .turntable-art-toggle {
     position: absolute;
-    top: 18px;
-    right: 18px;
-    z-index: 3;
+    left: 22px;
+    bottom: 10px;
+    z-index: 4;
+    display: flex;
+    gap: 2px;
+    padding: 4px;
+    border: 1px solid rgba(34, 18, 6, 0.48);
+    border-top-color: rgba(255, 235, 185, 0.18);
+    border-radius: 6px;
+    background:
+      radial-gradient(ellipse at 50% 0%, rgba(255, 230, 190, 0.08), transparent 70%),
+      linear-gradient(180deg, rgba(34, 27, 19, 0.96), rgba(12, 9, 7, 0.94));
+    box-shadow:
+      inset 0 1px 2px rgba(255, 235, 185, 0.08),
+      inset 0 -2px 5px rgba(0, 0, 0, 0.56),
+      0 3px 9px rgba(0, 0, 0, 0.32);
+  }
+  .turntable-art-toggle button {
+    min-width: 72px;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    color: #7a5c34;
+    cursor: pointer;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13px;
+    letter-spacing: 0.15em;
+    padding: 6px 10px;
+  }
+  .turntable-art-toggle button.active {
+    background: linear-gradient(180deg, #3a2a10, #2a1e0a);
+    color: #f0b44b;
+    box-shadow:
+      inset 0 1px 2px rgba(0, 0, 0, 0.72),
+      0 0 6px rgba(240, 180, 75, 0.22);
+  }
+
+  /* ── 控制台 host ── */
+  .console-host {
+    height: 100%;
+    min-height: 0;
+  }
+
+  /* ── 唱片架 ── */
+  .shelf-host {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  /* ── Info 纸卡 ── */
+  .info-host {
+    display: flex;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+  }
+  .paper {
+    position: relative;
+    border-radius: 8px;
+    padding: 18px 20px;
+    background: linear-gradient(180deg, #f5e8cf 0%, #e9d7b1 100%);
+    box-shadow:
+      0 6px 14px rgba(0, 0, 0, 0.3),
+      inset 0 0 0 1px rgba(180, 140, 90, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    font-family: "Noto Serif SC", "Cormorant Garamond", serif;
+    color: #2a1e10;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    min-height: 0;
+  }
+  .paper::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 8px;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0.5  0 0 0 0 0.4  0 0 0 0 0.25  0 0 0 0.12 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    mix-blend-mode: multiply;
+    opacity: 0.6;
     pointer-events: none;
   }
-
-  .eyebrow {
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.24em;
-    color: #86663a;
-    text-transform: uppercase;
-    font-family: "Courier New", monospace;
+  .paper > * {
+    position: relative;
+    z-index: 1;
   }
-
-  .panel-title {
-    font-size: calc(16px * var(--app-font-scale));
-    line-height: 1.1;
-    color: #241507;
-    font-weight: 700;
+  .info-host > .paper {
+    width: 100%;
+    height: 100%;
   }
-
-  .panel-title-block {
+  .liner-stack {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 0;
+    min-height: 0;
+    padding: 0;
+  }
+  .liner-stack .liner-panel + .liner-panel {
+    border-top: 1px dashed rgba(90, 58, 31, 0.28);
+  }
+  .liner-panel {
+    position: relative;
+    z-index: 2;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    min-width: 0;
+    min-height: 0;
+    padding: 18px 22px;
+  }
+  .liner-empty {
+    display: grid;
+    grid-template-columns: 1fr;
+    place-items: start;
+    padding: 18px 20px;
+  }
+  .liner-empty::after {
+    display: none;
+  }
+  .album-card {
+    gap: 0;
+    justify-content: flex-start;
+  }
+  .album-card-top {
+    display: grid;
+    grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+    align-items: start;
+    gap: 24px;
+    min-width: 0;
+    min-height: 0;
+  }
+  .mini-cover {
+    display: grid;
+    place-items: center;
+    align-self: start;
+    justify-self: start;
+    flex: 0 0 auto;
+    width: min(100%, 240px);
+    height: auto;
+    max-height: 240px;
+    aspect-ratio: 1;
+    overflow: hidden;
+    border-radius: 3px;
+    background: linear-gradient(145deg, #e4d8bc, #c2a36f);
+    box-shadow:
+      0 7px 14px rgba(0, 0, 0, 0.34),
+      inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+  }
+  .mini-cover img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .mini-cover span {
+    color: rgba(80, 52, 18, 0.36);
+    font-family: "Cormorant Garamond", serif;
+    font-size: clamp(56px, 8vw, 92px);
+    font-weight: 600;
+  }
+  .meta-column {
+    display: grid;
+    align-content: start;
+    gap: 16px;
+    min-width: 0;
+    min-height: 0;
+  }
+  .meta {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+    text-align: left;
+  }
+  .meta .title {
+    font-family: "Cormorant Garamond", "Noto Serif SC", serif;
+    font-size: 38px;
+    font-weight: 500;
+    line-height: 1.05;
+    display: -webkit-box;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+  }
+  .meta .artist {
+    font-size: 20px;
+    color: #5a4326;
+    margin: 0;
+  }
+  .tag-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 6px;
     min-width: 0;
   }
-
-  .panel-toolbar {
+  .tag-row-left {
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    justify-content: flex-start;
-    gap: 12px;
-    padding-top: 2px;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
   }
-
-  .status-pill {
-    white-space: nowrap;
-    border: 1px solid rgba(126, 94, 47, 0.22);
+  .genre-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
     border-radius: 999px;
-    padding: 5px 9px;
-    background: rgba(255, 250, 240, 0.52);
-    color: #71562e;
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.08em;
-    font-family: "Courier New", monospace;
+    background: rgba(201, 100, 45, 0.14);
+    box-shadow: inset 0 0 0 1px rgba(201, 100, 45, 0.32);
+    color: #8a4216;
+    font-family: "Noto Serif SC", serif;
+    font-size: 13px;
+    letter-spacing: 0.06em;
   }
-
-  .section {
+  .fav-star {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border: 0;
+    padding: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: #8a6a3c;
+    cursor: pointer;
+    transition: color 160ms ease, filter 160ms ease, transform 100ms ease;
+  }
+  .fav-star svg {
+    width: 22px;
+    height: 22px;
+    fill: transparent;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linejoin: round;
+    transition: fill 160ms ease, stroke 160ms ease, filter 160ms ease;
+  }
+  .fav-star:hover {
+    color: #c9642d;
+  }
+  .fav-star:active {
+    transform: scale(0.94);
+  }
+  .fav-star.active {
+    color: #e0a137;
+  }
+  .fav-star.active svg {
+    fill: #f0b44b;
+    stroke: #b87a21;
+    filter: drop-shadow(0 0 4px rgba(240, 180, 75, 0.55));
+  }
+  .stat-stack {
+    display: grid;
+    gap: 0;
+    width: 100%;
+    min-width: 0;
+  }
+  .album-stat {
+    display: grid;
+    grid-template-columns: 5.5em minmax(0, 1fr);
+    align-items: baseline;
+    gap: 16px;
+    min-width: 0;
+    padding: 8px 0;
+    border-bottom: 1px dashed rgba(90, 58, 31, 0.22);
+  }
+  .album-stat:last-child {
+    border-bottom: 0;
+  }
+  .stat-label {
+    color: #8a6a3c;
+    font-family: "Noto Serif SC", serif;
+    font-size: 13px;
+    letter-spacing: 0.1em;
+    white-space: nowrap;
+  }
+  .stat-value {
+    color: #2a1e10;
+    font-family: "JetBrains Mono", "Courier New", monospace;
+    font-size: 15px;
+    font-weight: 600;
+    text-align: right;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tracklist-paper {
+    gap: 8px;
+    padding-top: 24px;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .tl-head {
     display: flex;
-    flex-direction: column;
-    gap: 12px;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: "Noto Serif SC", serif;
+    font-size: 24px;
+    font-weight: 600;
+    padding-bottom: 12px;
+    border-bottom: 1px dashed rgba(90, 58, 31, 0.28);
   }
-
-  .section-label {
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: #846337;
-    font-family: "Courier New", monospace;
+  .tl-controls {
+    display: flex;
+    align-items: baseline;
+    gap: 18px;
+    min-width: 0;
   }
-
-  .text-action,
-  .toggle-library-btn {
+  .print-side-picker {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    color: #8a6a3c;
+    font-family: "Cormorant Garamond", "Noto Serif SC", serif;
+    font-size: 23px;
+    letter-spacing: 0.08em;
+  }
+  .print-side-link {
     border: 0;
     padding: 0;
     background: transparent;
-    color: #5b3a12;
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    color: inherit;
     cursor: pointer;
-    transition:
-      color 0.14s ease,
-      opacity 0.14s ease;
-    font-family: "Courier New", monospace;
-    text-decoration: none;
+    font: inherit;
+    font-style: italic;
+    letter-spacing: inherit;
   }
-
-  .text-action:hover,
-  .toggle-library-btn:hover {
-    color: #2b1905;
+  .print-side-link:hover:not(:disabled) {
+    color: #c9642d;
   }
-
-  .text-action:disabled {
-    opacity: 0.4;
+  .print-side-link.active {
+    color: #2a1e10;
+    font-weight: 700;
+    font-style: normal;
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
+  }
+  .print-side-link:disabled {
     cursor: default;
   }
-
-  .toggle-library-btn {
-    margin-left: auto;
+  .tl-status {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 14px;
+    font-weight: 400;
+    color: #8a6a3c;
+    letter-spacing: 0.06em;
   }
-
-  .collapsed-toggle-btn {
-    writing-mode: vertical-rl;
-    letter-spacing: 0.18em;
-    margin-left: 0;
-    padding-top: 8px;
-  }
-
-  .library-section {
-    padding-top: 14px;
-    border-top: 1px solid rgba(108, 76, 36, 0.18);
-  }
-
-
-  .helper,
-  .empty-state {
-    font-size: calc(10px * var(--app-font-scale));
-    line-height: 1.6;
-    color: #7d5f36;
-  }
-
-  .error {
-    color: #9e3225;
-    font-size: calc(10px * var(--app-font-scale));
-    line-height: 1.55;
-    padding: 10px 0 0;
-  }
-
-  .selected-album-meta {
-    font-size: calc(9px * var(--app-font-scale));
-    line-height: 1.5;
-    color: #6f4f26;
-    font-family: "Courier New", monospace;
-  }
-
-  .side-sheet {
+  .tracklist-scroll {
+    flex: 1;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
+    gap: 4px;
+    min-height: 0;
+    padding-right: 4px;
+  }
+  .current-side-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin: 16px 0 10px;
+    color: #8a6a3c;
+    font-family: "Cormorant Garamond", "Noto Serif SC", serif;
+    font-size: 21px;
+    font-style: italic;
+    letter-spacing: 0.1em;
+  }
+  .current-side-row span:last-child {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 14px;
+    font-style: normal;
+    letter-spacing: 0.04em;
+  }
+  .track-row {
+    display: grid;
+    grid-template-columns: 10px 40px minmax(0, 1fr) auto;
     gap: 10px;
-    padding-top: 14px;
-    border-top: 1px solid rgba(108, 76, 36, 0.14);
-  }
-
-  .side-sheet-head {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }
-
-  .sidebar-side-picker {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    align-items: center;
-    padding: 2px 0 6px;
-  }
-
-  .side-link {
+    align-items: baseline;
+    width: 100%;
     border: 0;
-    padding: 0 0 2px;
+    padding: 7px 6px;
+    border-radius: 4px;
     background: transparent;
-    color: rgba(92, 60, 23, 0.56);
-    font-size: calc(9px * var(--app-font-scale));
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    font-family: "Courier New", monospace;
-    cursor: pointer;
-    border-bottom: 1px solid transparent;
+    color: inherit;
+    font-family: "Cormorant Garamond", "Noto Serif SC", serif;
+    font-size: 27px;
+    text-align: left;
+    transition: background 0.5s ease;
+  }
+  .track-row.playing {
+    background: rgba(201, 100, 45, 0.08);
+  }
+  .track-row.playing .track-num,
+  .track-row.playing .track-title {
+    color: #c9642d;
+    font-weight: 600;
+  }
+  .track-led {
+    align-self: center;
+    justify-self: center;
+    width: 3px;
+    height: 6px;
+    border-radius: 2px;
+    background: rgba(78, 62, 35, 0.28);
+    box-shadow:
+      inset 0 0 2px rgba(0, 0, 0, 0.7),
+      0 0 0 rgba(240, 180, 75, 0);
+    transform: translateY(1px);
     transition:
-      color 0.14s ease,
-      border-color 0.14s ease;
+      width 0.16s ease-out,
+      height 0.16s ease-out,
+      background 0.22s ease-out,
+      box-shadow 0.9s ease-out,
+      opacity 0.9s ease-out;
   }
-
-  .side-link:hover {
-    color: #553712;
+  .track-row.playing .track-led {
+    width: 5px;
+    height: 9px;
+    background: radial-gradient(circle at 38% 32%, #fff4b6 0%, #f5c64e 42%, #d66f27 100%);
+    box-shadow:
+      inset 0 0 1px rgba(255, 252, 219, 0.95),
+      0 0 0 1px rgba(115, 61, 19, 0.22),
+      0 0 7px rgba(240, 180, 75, 0.98),
+      0 0 18px rgba(240, 180, 75, 0.58),
+      0 0 30px rgba(214, 111, 39, 0.24);
   }
-
-  .side-link.active {
-    color: #2b1702;
-    border-color: rgba(92, 60, 23, 0.72);
+  .track-num {
+    color: #5a4326;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 16px;
+    text-align: right;
   }
-
-  .sidebar-track-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    border-top: 1px solid rgba(110, 79, 39, 0.2);
-    border-bottom: 1px solid rgba(110, 79, 39, 0.16);
-  }
-
-  .sidebar-track-list-head {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 8px;
-    padding: 7px 0 8px;
-    border-bottom: 1px solid rgba(124, 86, 38, 0.18);
-    font-size: calc(8px * var(--app-font-scale));
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: rgba(108, 73, 31, 0.78);
-    font-family: "Courier New", monospace;
-  }
-
-  .sidebar-track {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 10px;
-    align-items: center;
-    padding: 9px 0;
-    border-bottom: 1px dotted rgba(127, 98, 57, 0.22);
-    position: relative;
-  }
-
-  .sidebar-track.playing {
-    border-bottom-color: rgba(94, 63, 24, 0.34);
-  }
-
-  .sidebar-track.playing::before {
-    content: "";
-    position: absolute;
-    left: -10px;
-    top: 7px;
-    bottom: 7px;
-    width: 2px;
-    background: rgba(95, 61, 20, 0.72);
-  }
-
-  .sidebar-track-num,
-  .sidebar-track-duration {
-    font-size: calc(9px * var(--app-font-scale));
-    color: #8c6d42;
-    font-family: "Courier New", monospace;
-  }
-
-  .sidebar-track-title {
+  .track-title {
+    color: #2a1e10;
     min-width: 0;
-    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    color: #4a2e0c;
-    font-size: calc(11px * var(--app-font-scale));
-    line-height: 1.35;
+    white-space: nowrap;
+    padding-bottom: 2px;
+    border-bottom: 1px dotted rgba(90, 58, 31, 0.38);
+  }
+  .track-time {
+    color: #5a4326;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 16px;
+    padding-bottom: 2px;
+    border-bottom: 1px dotted rgba(90, 58, 31, 0.38);
+  }
+  .liner-empty .helper {
+    color: #5a4326;
+    font-size: 18px;
   }
 
-  .sidebar-track.playing .sidebar-track-title {
-    color: #241300;
-    font-weight: 700;
+  /* ── Action bar ── */
+  .action-bar {
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 22px 16px;
+    border-top: 1px dashed rgba(90, 58, 31, 0.28);
   }
-
-  .sidebar-crate-section {
-    padding-top: 0;
-    border-top: none;
-  }
-
-
-  .side-helper {
-    padding: 6px 0 0;
-    border-top: 1px solid rgba(108, 76, 36, 0.14);
-  }
-
-  .main-panel {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding: 18px 18px 16px;
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
-    transition:
-      filter 0.24s ease,
-      transform 0.24s ease,
-      opacity 0.24s ease;
-  }
-
-
-  .turntable-stage {
-    flex: 1;
-    display: flex;
+  .action-btn {
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 0;
-    min-width: 0;
+    gap: 8px;
+    height: 40px;
+    padding: 0 18px;
+    border: 0;
+    border-radius: 6px;
+    background: linear-gradient(180deg, #3a2a16 0%, #1f140a 100%);
+    color: #f2e3c1;
+    font-family: "Noto Serif SC", serif;
+    font-size: 14px;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 230, 185, 0.18),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.4),
+      0 2px 4px rgba(0, 0, 0, 0.25);
+    transition: filter 0.15s ease, transform 0.1s ease;
+  }
+  .action-btn:hover {
+    filter: brightness(1.1);
+  }
+  .action-btn:active {
+    transform: translateY(1px);
+  }
+  .action-btn--primary {
+    flex: 1;
+    background: linear-gradient(180deg, #5a3a18 0%, #2e1b08 100%);
+    color: #ffe6b3;
+  }
+  .action-btn--ghost {
+    background: linear-gradient(180deg, #4a3420 0%, #251808 100%);
+  }
+  .action-btn--ghost .heart {
+    color: #e36b3a;
+  }
+  .action-btn--icon {
+    width: 40px;
+    padding: 0;
+    font-size: 18px;
+    letter-spacing: 0;
+  }
+
+  /* ── Workshop Modal ── */
+  .ws-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(8, 4, 1, 0.78);
+    backdrop-filter: blur(8px);
+    display: grid;
+    place-items: center;
+    padding: 24px 20px;
+    /* 让 backdrop 可聚焦（支持键盘关闭） */
+    outline: none;
+  }
+
+  .ws-panel {
+    position: relative;
+    width: 100%;
+    max-width: 980px;
+    max-height: calc(100vh - 48px);
+    max-height: calc(100dvh - 48px);
+    background:
+      radial-gradient(ellipse at 50% 0%, rgba(255, 230, 190, 0.06) 0%, transparent 55%),
+      linear-gradient(180deg, #fdf7e8 0%, #f5ead0 100%);
+    border-radius: 20px;
+    box-shadow:
+      0 60px 120px -20px rgba(0, 0, 0, 0.7),
+      0 0 0 1px rgba(90, 58, 31, 0.2),
+      inset 0 1px 0 rgba(255, 245, 220, 0.8);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 
-  @media (max-width: 1180px) {
-    .studio {
-      grid-template-columns: minmax(272px, 300px) minmax(0, 1fr);
-    }
-
-    .main-panel {
-      padding: 18px 16px 14px;
-    }
+  /* 右上角独立关闭按钮 */
+  .ws-close-btn {
+    position: absolute;
+    top: 16px;
+    right: 18px;
+    z-index: 2;
+    background: rgba(255, 240, 210, 0.7);
+    border: 1px solid rgba(90, 58, 31, 0.18);
+    border-radius: 50%;
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    color: #8a6432;
+    font-size: 15px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .ws-close-btn:hover {
+    background: rgba(201, 100, 45, 0.15);
+    color: #c9642d;
   }
 
-  @media (max-width: 920px) {
-    :global(body) {
-      overflow: auto;
-    }
-
-    main {
-      height: auto;
-      min-height: 100vh;
-    }
-
-    main.desktop-overlay-shell .library-panel {
-      padding-top: 0px;
-    }
-
-    .titlebar-drag-region {
-      height: 44px;
-    }
-
-    .studio {
-      grid-template-columns: 1fr;
-      height: auto;
-    }
-
-    .library-panel {
-      border-right: 0;
-      border-bottom: 1px solid rgba(112, 76, 31, 0.18);
-      min-height: 320px;
-    }
-
-    .library-panel.collapsed {
-      min-height: auto;
-      border-bottom: none;
-      background: transparent;
-      backdrop-filter: none;
-    }
-    .studio.collapsed-layout {
-      grid-template-columns: 1fr;
-    }
-
-    .turntable-stage {
-      min-height: min(62vw, 520px);
-    }
-
-    .turntable-status-bar {
-      justify-content: flex-start;
-    }
-
-    .panel-head {
-      flex-direction: column;
-      align-items: stretch;
-    }
-
+  /* ── 状态 / 错误 ── */
+  .status-bar {
+    position: fixed;
+    top: 34px;
+    right: 16px;
+    display: flex;
+    gap: 8px;
+    z-index: 1000;
+  }
+  .status-pill {
+    background: rgba(10, 6, 3, 0.8);
+    color: #f2e8d6;
+    border: 1px solid rgba(201, 154, 91, 0.4);
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    letter-spacing: 0.2em;
+  }
+  .error-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    background: rgba(143, 47, 34, 0.92);
+    color: #fff8e6;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    z-index: 1000;
+    max-width: 80vw;
   }
 </style>

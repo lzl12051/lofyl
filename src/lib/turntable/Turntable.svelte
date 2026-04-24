@@ -14,6 +14,7 @@
   export let currentTime: number = 0;
   export let isPlaying: boolean = false;
   export let isPlatterSpinning: boolean = false;
+  export let platterBrakeRate: number = 1;
   export let tonearmState: TonearmState = 'parked';
   export let musicMeterLevels: number[] = [];
   export let isSpectrumEnabled: boolean = true;
@@ -24,7 +25,11 @@
   export let onToggleSpectrum: () => void = () => {};
   export let onNeedleDragStart: () => void = () => {};
   export let onNeedleDrop: (timeInSide: number | null) => void = () => {};
+  export let onPlatterBrakeRateChange: (rate: number) => void = () => {};
   export let onArtworkModeChange: (mode: DiscArtworkMode) => void = () => {};
+  // 无外壳模式：不绘制木箱体/品牌字，不显示内置的 PLAY / SPEC / DISC / LABEL 面板；
+  // 由外层容器（Cabinet）提供背景与控件。canvas 背景变为透明。
+  export let chromeless: boolean = false;
 
   // ── 切换动画 ──────────────────────────────────────────────────
   // 'swap'  换碟/换专辑：封套从顶部伸入，唱片浮起插回封套
@@ -52,7 +57,11 @@
   let scheduledSyncId: number | null = null;
   let isDraggingNeedle = false;
   let isNeedleHovering = false;
+  let isBrakingPlatter = false;
   let activePointerId: number | null = null;
+  let platterBrakePointerId: number | null = null;
+  let platterBrakeStartedAt = 0;
+  let localPlatterBrakeRate = 1;
   let dragPreviewTime: number | null = null;
   let dragArmAngle: number | null = null;
   let isManualCarryDrag = false;
@@ -106,6 +115,7 @@
   const RAD_PER_SEC = (RPM / 60) * 2 * Math.PI;
   const PLATTER_SPINUP_MS = 2300;
   const PLATTER_SPINDOWN_MS = 1200;
+  const PLATTER_BRAKE_TO_ZERO_MS = 5000;
   const TONEARM_RETURN_MS = 1200;
   const TONEARM_CUE_MS = 1500;
   const TONEARM_DROP_MS = 700;
@@ -158,6 +168,15 @@
     requestDraw();
   }
 
+  $: if (!isBrakingPlatter && Math.abs(localPlatterBrakeRate - platterBrakeRate) > 0.001) {
+    localPlatterBrakeRate = Math.max(0, Math.min(1, platterBrakeRate));
+    requestDraw();
+  }
+
+  $: if (!isPlaying && isBrakingPlatter) {
+    endPlatterBrake();
+  }
+
   function getSpectrumLitRows(level: number): number {
     return Math.max(
       0,
@@ -207,6 +226,8 @@
       dropAnimDuration > 0 ||
       returnAnimDuration > 0 ||
       isDraggingNeedle ||
+      isBrakingPlatter ||
+      localPlatterBrakeRate < 0.999 ||
       Math.abs(animatedArmAngle - resolveTargetArmAngle()) > 0.001
     );
   }
@@ -242,6 +263,13 @@
     platterSpeedAnimStart = now;
     platterSpeedAnimDuration = nextSpeed > platterSpeed ? PLATTER_SPINUP_MS : PLATTER_SPINDOWN_MS;
     requestDraw();
+  }
+
+  function setLocalPlatterBrakeRate(nextRate: number) {
+    const clamped = Math.max(0, Math.min(1, nextRate));
+    if (Math.abs(clamped - localPlatterBrakeRate) < 0.002) return;
+    localPlatterBrakeRate = clamped;
+    onPlatterBrakeRateChange(clamped);
   }
 
   function startCueAnimation(nextAngle: number) {
@@ -608,10 +636,12 @@
     }
 
     ctx.clearRect(0, 0, W, H);
-    if (machineLayer) {
-      ctx.drawImage(machineLayer, 0, 0, W, H);
-    } else {
-      drawMachineSurface(W, H);
+    if (!chromeless) {
+      if (machineLayer) {
+        ctx.drawImage(machineLayer, 0, 0, W, H);
+      } else {
+        drawMachineSurface(W, H);
+      }
     }
 
     if (platterShadowLayer) {
@@ -695,6 +725,11 @@
     const dt = lastTimestamp ? (timestamp - lastTimestamp) / 1000 : 0;
     lastTimestamp = timestamp;
 
+    if (isBrakingPlatter) {
+      const heldMs = Math.max(0, timestamp - platterBrakeStartedAt);
+      setLocalPlatterBrakeRate(Math.max(0, 1 - heldMs / PLATTER_BRAKE_TO_ZERO_MS));
+    }
+
     // ── 转盘转速动画（spinup/spindown）──────────────────────────
     if (platterSpeedAnimDuration > 0) {
       const pp = Math.min(1, (timestamp - platterSpeedAnimStart) / platterSpeedAnimDuration);
@@ -707,7 +742,7 @@
         platterSpeedAnimDuration = 0;
       }
     }
-    platAngle += RAD_PER_SEC * platterSpeed * dt;
+    platAngle += RAD_PER_SEC * platterSpeed * localPlatterBrakeRate * dt;
     const targetArmAngle = resolveTargetArmAngle();
 
     // ── 唱臂动画状态机 ─────────────────────────────────────────
@@ -1329,13 +1364,14 @@
     const grooveOuterPx = r * GROOVE_OUTER_RADIUS;
     const grooveInnerPx = r * playableInnerRadius;
     drawOuterLeadInGloss(r, grooveOuterPx);
-    for (let i = 0; i <= 90; i++) {
-      const t = i / 90;
+    const GROOVE_COUNT = 260;
+    for (let i = 0; i <= GROOVE_COUNT; i++) {
+      const t = i / GROOVE_COUNT;
       const gr = grooveInnerPx + t * (grooveOuterPx - grooveInnerPx);
-      const alpha = 0.03 + 0.05 * Math.pow(Math.sin(t * Math.PI), 0.5);
+      const alpha = 0.052 + 0.088 * Math.sin(t * Math.PI);
       ctx.beginPath();
       ctx.arc(0, 0, gr, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(210, 200, 170, ${alpha})`;
+      ctx.strokeStyle = `rgba(210, 200, 170, ${alpha.toFixed(3)})`;
       ctx.lineWidth = 0.5;
       ctx.stroke();
     }
@@ -1460,38 +1496,64 @@
   function drawOuterLeadInHighlight(discRadius: number, grooveOuterPx: number) {
     const outerBandInner = grooveOuterPx;
     const outerBandOuter = discRadius * 0.998;
-
     if (outerBandOuter <= outerBandInner) return;
 
     ctx.save();
+    // Restrict to the ungrooved outer rim only
+    ctx.beginPath();
+    ctx.arc(0, 0, outerBandOuter, 0, Math.PI * 2);
+    ctx.arc(0, 0, outerBandInner, 0, Math.PI * 2, true);
+    ctx.clip('evenodd');
+
     ctx.globalCompositeOperation = 'screen';
 
-    const ringHighlight = ctx.createConicGradient(0, 0, 0);
-    ringHighlight.addColorStop(0, 'rgba(255,248,230,0)');
-    ringHighlight.addColorStop(0.08, 'rgba(255,248,230,0)');
-    ringHighlight.addColorStop(0.18, 'rgba(255,248,230,0.16)');
-    ringHighlight.addColorStop(0.28, 'rgba(255,248,230,0.05)');
-    ringHighlight.addColorStop(0.5, 'rgba(255,248,230,0)');
-    ringHighlight.addColorStop(0.68, 'rgba(255,248,230,0.09)');
-    ringHighlight.addColorStop(0.78, 'rgba(255,248,230,0.02)');
-    ringHighlight.addColorStop(1, 'rgba(255,248,230,0)');
-    ctx.strokeStyle = ringHighlight;
-    ctx.lineWidth = Math.max(1.2, discRadius * 0.018);
-    ctx.beginPath();
-    ctx.arc(0, 0, (outerBandInner + outerBandOuter) * 0.5, 0, Math.PI * 2);
-    ctx.stroke();
+    // Near-white specular — the lead-in rim is an unrecorded mirror surface.
+    // Peak approaches pure white; drops off sharply on the shadow side.
+    const specular = ctx.createConicGradient(-Math.PI * 0.32, 0, 0);
+    specular.addColorStop(0,    'rgba(255,255,255,0)');
+    specular.addColorStop(0.07, 'rgba(255,255,255,0.04)');
+    specular.addColorStop(0.16, 'rgba(255,255,255,0.94)');
+    specular.addColorStop(0.22, 'rgba(255,255,252,0.48)');
+    specular.addColorStop(0.34, 'rgba(255,252,244,0.09)');
+    specular.addColorStop(0.58, 'rgba(255,252,244,0.04)');
+    specular.addColorStop(0.72, 'rgba(255,252,244,0.22)');
+    specular.addColorStop(0.83, 'rgba(255,252,244,0.06)');
+    specular.addColorStop(1,    'rgba(255,255,255,0)');
+    ctx.fillStyle = specular;
+    ctx.fillRect(-discRadius, -discRadius, discRadius * 2, discRadius * 2);
 
-    const specular = ctx.createConicGradient(0, 0, 0);
-    specular.addColorStop(0, 'rgba(255,252,240,0)');
-    specular.addColorStop(0.12, 'rgba(255,252,240,0)');
-    specular.addColorStop(0.2, 'rgba(255,252,240,0.22)');
-    specular.addColorStop(0.25, 'rgba(255,252,240,0.08)');
-    specular.addColorStop(1, 'rgba(255,252,240,0)');
-    ctx.strokeStyle = specular;
-    ctx.lineWidth = Math.max(0.9, discRadius * 0.01);
+    ctx.restore();
+  }
+
+  // Near-white specular for the inner dead-wax ring (between last groove and label edge).
+  // Called inside drawDiscLighting, so ctx is already translated to disc centre.
+  function drawDeadWaxHighlight(discRadius: number) {
+    const playableInner = side ? getPlayableInnerRadius(side.totalDuration) : GROOVE_INNER_RADIUS;
+    const deadWaxInner = discRadius * LABEL_RADIUS;
+    const deadWaxOuter = discRadius * playableInner;
+    if (deadWaxOuter <= deadWaxInner + 0.5) return;
+
+    ctx.save();
     ctx.beginPath();
-    ctx.arc(0, 0, outerBandOuter - (outerBandOuter - outerBandInner) * 0.28, 0, Math.PI * 2);
-    ctx.stroke();
+    ctx.arc(0, 0, deadWaxOuter, 0, Math.PI * 2);
+    ctx.arc(0, 0, deadWaxInner, 0, Math.PI * 2, true);
+    ctx.clip('evenodd');
+
+    ctx.globalCompositeOperation = 'screen';
+
+    // Slightly less intense than the outer rim — same mirror finish, narrower ring.
+    const specular = ctx.createConicGradient(-Math.PI * 0.32, 0, 0);
+    specular.addColorStop(0,    'rgba(255,255,255,0)');
+    specular.addColorStop(0.08, 'rgba(255,255,255,0.03)');
+    specular.addColorStop(0.17, 'rgba(255,255,254,0.76)');
+    specular.addColorStop(0.23, 'rgba(255,255,250,0.36)');
+    specular.addColorStop(0.38, 'rgba(255,252,242,0.07)');
+    specular.addColorStop(0.60, 'rgba(255,252,242,0.03)');
+    specular.addColorStop(0.74, 'rgba(255,252,242,0.18)');
+    specular.addColorStop(0.85, 'rgba(255,252,242,0.05)');
+    specular.addColorStop(1,    'rgba(255,255,255,0)');
+    ctx.fillStyle = specular;
+    ctx.fillRect(-discRadius, -discRadius, discRadius * 2, discRadius * 2);
 
     ctx.restore();
   }
@@ -1638,8 +1700,8 @@
     ctx.save();
     ctx.beginPath();
     ctx.arc(cx, cy, r * 0.995, 0, Math.PI * 2);
-    ctx.moveTo(cx + r * LABEL_RADIUS * 1.18, cy);
-    ctx.arc(cx, cy, r * LABEL_RADIUS * 1.18, 0, Math.PI * 2, true);
+    ctx.moveTo(cx + r * LABEL_RADIUS, cy);
+    ctx.arc(cx, cy, r * LABEL_RADIUS, 0, Math.PI * 2, true);
     ctx.clip('evenodd');
 
     // 外缘暗角，强化厚度和压盘感
@@ -1661,10 +1723,11 @@
     const grooveInner = r * LABEL_RADIUS * 1.22;
     const grooveOuter = r * 0.985;
     drawOuterLeadInHighlight(r, r * GROOVE_OUTER_RADIUS);
+    drawDeadWaxHighlight(r);
     const highlightBands = [
-      { start: -2.22, end: -1.48, peak: -1.86, alpha: 0.1, width: 1.1, feather: 0.16 },
-      { start: -1.28, end: -0.86, peak: -1.04, alpha: 0.055, width: 0.72, feather: 0.12 },
-      { start: 1.94, end: 2.18, peak: 2.07, alpha: 0.022, width: 0.58, feather: 0.1 },
+      { start: -2.44, end: -1.26, peak: -1.82, alpha: 0.28, width: 1.4, feather: 0.22 },
+      { start: -1.10, end: -0.70, peak: -0.94, alpha: 0.10, width: 0.88, feather: 0.14 },
+      { start: 1.88, end: 2.24, peak: 2.07, alpha: 0.042, width: 0.72, feather: 0.12 },
     ];
 
     for (const band of highlightBands) {
@@ -2118,6 +2181,17 @@
     return ((GROOVE_OUTER_RADIUS - normalizedRadius) / playableSpan) * side.totalDuration;
   }
 
+  function isPointOnRecord(x: number, y: number): boolean {
+    if (!side) return false;
+    const { cx, cy, discRadius: r } = getTurntableGeometry(drawW, drawH);
+    const recordOffset = getRecordCenterOffsetPx(r);
+    const normalizedRadius = Math.hypot(
+      x - (cx + recordOffset.x),
+      y - (cy + recordOffset.y),
+    ) / r;
+    return normalizedRadius >= LABEL_RADIUS * 0.72 && normalizedRadius <= 1;
+  }
+
   function getArmAngleFromPoint(x: number, y: number): number {
     const { pivotX, pivotY } = getTonearmGeometry(drawW, drawH);
     return Math.atan2(y - pivotY, x - pivotX);
@@ -2155,9 +2229,22 @@
 
   function handlePointerDown(e: PointerEvent) {
     if (!side || !canvas || drawW === 0) return;
+    if (e.button !== 0) return;
 
     updateNeedleHover(e);
-    if (!isNeedleHovering) return;
+    if (!isNeedleHovering) {
+      const point = getCanvasPoint(e);
+      if (isPlaying && isPointOnRecord(point.x, point.y)) {
+        isBrakingPlatter = true;
+        platterBrakePointerId = e.pointerId;
+        platterBrakeStartedAt = performance.now();
+        setLocalPlatterBrakeRate(1);
+        canvas.setPointerCapture(e.pointerId);
+        requestDraw();
+        e.preventDefault();
+      }
+      return;
+    }
 
     activePointerId = e.pointerId;
     isDraggingNeedle = true;
@@ -2174,6 +2261,11 @@
   function handlePointerMove(e: PointerEvent) {
     if (!canvas || drawW === 0) return;
 
+    if (isBrakingPlatter && platterBrakePointerId === e.pointerId) {
+      e.preventDefault();
+      return;
+    }
+
     if (isDraggingNeedle && activePointerId === e.pointerId) {
       updateDraggedNeedle(e);
       e.preventDefault();
@@ -2185,6 +2277,14 @@
 
   function stopNeedleDrag(e: PointerEvent) {
     if (!canvas) return;
+    if (isBrakingPlatter && platterBrakePointerId === e.pointerId) {
+      if (canvas.hasPointerCapture(e.pointerId)) {
+        canvas.releasePointerCapture(e.pointerId);
+      }
+      endPlatterBrake();
+      e.preventDefault();
+      return;
+    }
     if (activePointerId !== e.pointerId) return;
 
     const finalTime = isManualCarryDrag ? dragPreviewTime : (dragPreviewTime ?? effectiveTime);
@@ -2203,6 +2303,14 @@
     if (shouldCommitDrop) {
       onNeedleDrop(finalTime);
     }
+    requestDraw();
+  }
+
+  function endPlatterBrake() {
+    isBrakingPlatter = false;
+    platterBrakePointerId = null;
+    platterBrakeStartedAt = 0;
+    setLocalPlatterBrakeRate(1);
     requestDraw();
   }
 
@@ -2225,7 +2333,7 @@
   }
 
   onMount(() => {
-    ctx = canvas.getContext('2d', { alpha: false })!;
+    ctx = canvas.getContext('2d', { alpha: chromeless })!;
 
     syncCanvasSize();
     scheduleCanvasSync();
@@ -2409,6 +2517,7 @@
       </div>
     {/if}
 
+    {#if !chromeless}
     <div class="machine-front-controls">
       <button
         class="console-btn"
@@ -2462,6 +2571,7 @@
         >LABEL</button>
       </div>
     </div>
+    {/if}
   </div>
 </div>
 
@@ -2734,13 +2844,14 @@
     width: 76.4%;
     aspect-ratio: 1;
     z-index: 2;
-    border-radius: 5px;
+    border-radius: 6px;
     overflow: hidden;
-    background: linear-gradient(155deg, #ece1c5 0%, #ddd1b0 100%);
+    background: linear-gradient(148deg, #f0e6d0 0%, #e2d4b8 52%, #cfc09e 100%);
     box-shadow:
-      inset 0 0 0 6px rgba(234, 222, 196, 0.48),
-      0 0 0 1.5px rgba(72, 46, 14, 0.20),
-      0 22px 64px rgba(4, 2, 0, 0.62);
+      inset 0 0 0 5px rgba(255, 248, 232, 0.36),
+      inset 0 0 0 6px rgba(180, 152, 106, 0.22),
+      0 0 0 1.5px rgba(60, 36, 8, 0.28),
+      0 28px 72px rgba(4, 2, 0, 0.68);
     transform: translateY(-110%);
     opacity: 0;
   }
@@ -2799,15 +2910,15 @@
     pointer-events: none;
     background:
       linear-gradient(
-        140deg,
-        rgba(255, 255, 255, 0.18) 0%,
-        rgba(255, 255, 255, 0.04) 26%,
-        transparent 46%
+        138deg,
+        rgba(255, 255, 255, 0.24) 0%,
+        rgba(255, 255, 255, 0.07) 22%,
+        transparent 42%
       ),
       linear-gradient(
-        320deg,
-        rgba(0, 0, 0, 0.06) 0%,
-        transparent 38%
+        318deg,
+        rgba(0, 0, 0, 0.10) 0%,
+        transparent 36%
       );
   }
 
