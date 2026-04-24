@@ -163,6 +163,7 @@
     height: 100%;
     min-height: 0;
     border-radius: 12px;
+    isolation: isolate;
     background:
       radial-gradient(ellipse at 50% 0%, rgba(255, 230, 190, 0.09), transparent 62%),
       linear-gradient(180deg, #2d241a 0%, #1d1711 58%, #15100c 100%);
@@ -176,6 +177,19 @@
     align-items: stretch;
     gap: 12px;
     padding: 14px 14px 12px;
+    overflow: hidden;
+  }
+
+  .console::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    background: url("../../assets/textures/brushed-metal-panel.webp") center / 100% 100% no-repeat;
+    mix-blend-mode: soft-light;
+    opacity: 0.64;
+    pointer-events: none;
   }
 
   .console-top {
@@ -185,6 +199,7 @@
   .console-left,
   .console-right {
     position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -234,6 +249,7 @@
   /* 频谱 */
   .spectrum-panel {
     position: relative;
+    z-index: 1;
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto;
     gap: 7px;

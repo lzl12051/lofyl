@@ -41,6 +41,9 @@
   export let swapToDiscArtworkUrl: string | undefined = undefined;
   export let swapFromSideLabel: string | undefined = undefined;
   export let swapToSideLabel: string | undefined = undefined;
+  // 渲染快照所需：动画期间，由 App 传入两面的完整 side 数据（决定刻槽密度等）。
+  export let swapFromSide: DiscSide | null = null;
+  export let swapToSide: DiscSide | null = null;
 
   const SPECTRUM_ROW_COUNT = 6;
   const SPECTRUM_COLUMN_COUNT = 16;
@@ -68,6 +71,9 @@
   let canvasDisplaySize = 0;
   let renderDpr = 1;
   let coverImageVersion = 0;
+  let coverImageLoadedSrc: string | undefined = undefined;
+  let coverImagePendingSrc: string | undefined = undefined;
+  let coverImageFailedSrc: string | undefined = undefined;
   let machineLayer: HTMLCanvasElement | null = null;
   let platterLayer: HTMLCanvasElement | null = null;
   let discBaseLayer: HTMLCanvasElement | null = null;
@@ -119,14 +125,15 @@
   const TONEARM_RETURN_MS = 1200;
   const TONEARM_CUE_MS = 1500;
   const TONEARM_DROP_MS = 700;
+  const TURNTABLE_VISUAL_SCALE = 1.1;
   const CENTER_X_NORM = 0.5;
   const CENTER_Y_NORM = 0.462;
-  const PLATTER_RADIUS_NORM = 0.4;
-  const DISC_RADIUS_NORM = 0.382;
+  const PLATTER_RADIUS_NORM = 0.4 * TURNTABLE_VISUAL_SCALE;
+  const DISC_RADIUS_NORM = 0.382 * TURNTABLE_VISUAL_SCALE;
   const RECORD_ECCENTRICITY_NORM = 0.0022;
   const PIVOT_X_CANVAS_NORM = 0.955;
   const PIVOT_Y_CANVAS_NORM = 0.077;
-  const NEEDLE_DRAG_HIT_RADIUS = 18;
+  const NEEDLE_DRAG_HIT_RADIUS = 20;
   const MAX_RENDER_DPR = 1.5;
   const PLAYBACK_TARGET_FPS = 48;
   const PLAYBACK_FRAME_INTERVAL_MS = 1000 / PLAYBACK_TARGET_FPS;
@@ -177,6 +184,13 @@
     endPlatterBrake();
   }
 
+  // Side labels remain part of the transition API for App-level bookkeeping;
+  // the canvas renderer now reads the full side objects instead.
+  $: {
+    const transitionLabelPair = `${swapFromSideLabel ?? ''}:${swapToSideLabel ?? ''}`;
+    void transitionLabelPair;
+  }
+
   function getSpectrumLitRows(level: number): number {
     return Math.max(
       0,
@@ -204,6 +218,242 @@
     return 1 - Math.pow(1 - t, 4);
   }
 
+  function clamp01(t: number): number {
+    return Math.max(0, Math.min(1, t));
+  }
+
+  function lerp(a: number, b: number, t: number): number {
+    return a + (b - a) * t;
+  }
+
+  function getSwapAnimationDuration(kind: 'swap' | 'flip'): number {
+    return kind === 'flip' ? FLIP_ANIMATION_MS : SWAP_ANIMATION_MS;
+  }
+
+  function getDiscLightingAlpha(timestamp: number): number {
+    if (swapAnim !== 'idle') {
+      const duration = getSwapAnimationDuration(swapAnim);
+      const p = clamp01((timestamp - swapAnimStartedAt) / duration);
+      const dimEnd = swapAnim === 'flip' ? 0.18 : 0.12;
+      if (p < dimEnd) {
+        return lerp(1, SWAP_LIGHT_MIN_ALPHA, easeInOutCubic(p / dimEnd));
+      }
+      return SWAP_LIGHT_MIN_ALPHA;
+    }
+
+    if (isSwapSettling) {
+      return SWAP_LIGHT_MIN_ALPHA;
+    }
+
+    if (isLightRestoring) {
+      const p = clamp01((timestamp - lightRestoreStartedAt) / SWAP_LIGHT_RESTORE_MS);
+      return lerp(SWAP_LIGHT_MIN_ALPHA, 1, easeInOutCubic(p));
+    }
+
+    return 1;
+  }
+
+  function drawDiscVisualLayer(
+    layer: HTMLCanvasElement | null,
+    turntable: ReturnType<typeof getTurntableGeometry>,
+    transform: {
+      y: number;
+      scale: number;
+      scaleY?: number;
+      angle?: number;
+      offsetAngle?: number;
+      opacity?: number;
+    },
+  ) {
+    if (!layer) return;
+    const recordOffset = getRecordCenterOffsetPx(turntable.discRadius, transform.offsetAngle);
+    ctx.save();
+    ctx.globalAlpha *= transform.opacity ?? 1;
+    ctx.translate(turntable.cx + recordOffset.x, turntable.cy + recordOffset.y + transform.y);
+    ctx.scale(transform.scale, transform.scale * (transform.scaleY ?? 1));
+    if (transform.angle) {
+      ctx.rotate(transform.angle);
+    }
+    ctx.drawImage(layer, -turntable.cx, -turntable.cy, drawW, drawH);
+    ctx.restore();
+  }
+
+  function drawDiscVisual(
+    visual: SwapDiscVisual | null,
+    turntable: ReturnType<typeof getTurntableGeometry>,
+    transform: {
+      y: number;
+      scale: number;
+      scaleY?: number;
+      opacity?: number;
+      lightingAlpha: number;
+      shadowAlpha?: number;
+    },
+  ) {
+    if (!visual) return;
+    const opacity = transform.opacity ?? 1;
+    const shadowAlpha = transform.shadowAlpha ?? 0.72;
+    drawDiscVisualLayer(discShadowLayer, turntable, {
+      ...transform,
+      offsetAngle: visual.angle,
+      opacity: opacity * shadowAlpha,
+    });
+    drawDiscVisualLayer(visual.base, turntable, {
+      ...transform,
+      angle: visual.angle,
+      offsetAngle: visual.angle,
+      opacity,
+    });
+    drawDiscVisualLayer(visual.lighting, turntable, {
+      ...transform,
+      offsetAngle: visual.angle,
+      opacity: opacity * transform.lightingAlpha,
+    });
+  }
+
+  function interpolateSwapKeyframes(
+    p: number,
+    keyframes: Array<{ at: number; y: number; scale: number; opacity: number }>,
+  ) {
+    if (p <= keyframes[0].at) return keyframes[0];
+    for (let i = 1; i < keyframes.length; i++) {
+      const prev = keyframes[i - 1];
+      const next = keyframes[i];
+      if (p <= next.at) {
+        const t = easeInOutCubic((p - prev.at) / (next.at - prev.at));
+        return {
+          at: p,
+          y: lerp(prev.y, next.y, t),
+          scale: lerp(prev.scale, next.scale, t),
+          opacity: lerp(prev.opacity, next.opacity, t),
+        };
+      }
+    }
+    return keyframes[keyframes.length - 1];
+  }
+
+  function drawSwapDiscAnimation(W: number, H: number, timestamp: number) {
+    if (swapAnim === 'idle') return;
+    const turntable = getTurntableGeometry(W, H);
+    const diameter = turntable.discRadius * 2;
+    const lightingAlpha = getDiscLightingAlpha(timestamp);
+    const duration = getSwapAnimationDuration(swapAnim);
+    const p = clamp01((timestamp - swapAnimStartedAt) / duration);
+
+    if (swapAnim === 'swap') {
+      const incoming = interpolateSwapKeyframes(p, [
+        { at: 0, y: -1.10, scale: 0.98, opacity: 0 },
+        { at: 0.48, y: -1.10, scale: 0.98, opacity: 0 },
+        { at: 0.62, y: -0.62, scale: 1, opacity: 1 },
+        { at: 0.76, y: -0.30, scale: 1.02, opacity: 1 },
+        { at: 0.90, y: 0, scale: 1, opacity: 1 },
+        { at: 1, y: 0, scale: 1, opacity: 1 },
+      ]);
+      drawDiscVisual(swapToVisual, turntable, {
+        y: incoming.y * diameter,
+        scale: incoming.scale,
+        opacity: incoming.opacity,
+        lightingAlpha,
+        shadowAlpha: 0.42,
+      });
+
+      const outgoing = interpolateSwapKeyframes(p, [
+        { at: 0, y: 0, scale: 1, opacity: 1 },
+        { at: 0.12, y: 0, scale: 1, opacity: 1 },
+        { at: 0.26, y: -0.30, scale: 1.02, opacity: 1 },
+        { at: 0.40, y: -0.62, scale: 1, opacity: 1 },
+        { at: 0.52, y: -1.10, scale: 0.98, opacity: 0 },
+        { at: 1, y: -1.10, scale: 0.98, opacity: 0 },
+      ]);
+      drawDiscVisual(swapFromVisual, turntable, {
+        y: outgoing.y * diameter,
+        scale: outgoing.scale,
+        opacity: outgoing.opacity,
+        lightingAlpha,
+        shadowAlpha: 0.42,
+      });
+      return;
+    }
+
+    const face = p < 0.5 ? swapFromVisual : (swapToVisual ?? swapFromVisual);
+    const yNorm = p < 0.18
+      ? lerp(0, -0.08, easeInOutCubic(p / 0.18))
+      : p < 0.5
+        ? lerp(-0.08, -0.12, easeInOutCubic((p - 0.18) / 0.32))
+        : p < 0.82
+          ? lerp(-0.12, -0.07, easeInOutCubic((p - 0.5) / 0.32))
+          : lerp(-0.07, 0, easeInOutCubic((p - 0.82) / 0.18));
+    const scale = p < 0.18
+      ? lerp(1, 1.03, easeInOutCubic(p / 0.18))
+      : p < 0.5
+        ? lerp(1.03, 1.02, easeInOutCubic((p - 0.18) / 0.32))
+        : p < 0.82
+          ? lerp(1.02, 1.03, easeInOutCubic((p - 0.5) / 0.32))
+          : lerp(1.03, 1, easeInOutCubic((p - 0.82) / 0.18));
+    const flipAngle = p < 0.5
+      ? lerp(0, Math.PI / 2, easeInOutCubic(p / 0.5))
+      : lerp(Math.PI / 2, Math.PI, easeInOutCubic((p - 0.5) / 0.5));
+    const scaleY = Math.max(0.035, Math.abs(Math.cos(flipAngle)));
+    drawDiscVisual(face, turntable, {
+      y: yNorm * diameter,
+      scale,
+      scaleY,
+      opacity: 1,
+      lightingAlpha,
+      shadowAlpha: 0.82,
+    });
+  }
+
+  function drawSwapSettleDisc(W: number, H: number, timestamp: number) {
+    const turntable = getTurntableGeometry(W, H);
+    drawDiscVisual(swapToVisual ?? swapFromVisual, turntable, {
+      y: 0,
+      scale: 1,
+      opacity: 1,
+      lightingAlpha: getDiscLightingAlpha(timestamp),
+      shadowAlpha: 0.72,
+    });
+  }
+
+  function isCoverImageReadyForLiveDisc(): boolean {
+    if (!discArtworkUrl) return true;
+    return coverImageLoadedSrc === discArtworkUrl || coverImageFailedSrc === discArtworkUrl;
+  }
+
+  function isLiveDiscReadyForReveal(): boolean {
+    if (!isCoverImageReadyForLiveDisc()) return false;
+    ensureRenderLayers();
+    return !!discBaseLayer && !!discLightingLayer && !discBaseLayerDirty && !discLightingLayerDirty;
+  }
+
+  function finishSwapSettle(timestamp: number) {
+    isSwapSettling = false;
+    swapSettleStartedAt = 0;
+    swapFromVisual = null;
+    swapToVisual = null;
+    isLightRestoring = true;
+    lightRestoreStartedAt = timestamp;
+    requestDraw();
+  }
+
+  function updateTransitionLightingState(timestamp: number) {
+    if (
+      isSwapSettling &&
+      timestamp - swapSettleStartedAt >= SWAP_SETTLE_MIN_MS &&
+      isLiveDiscReadyForReveal()
+    ) {
+      finishSwapSettle(timestamp);
+    }
+
+    if (
+      isLightRestoring &&
+      timestamp - lightRestoreStartedAt >= SWAP_LIGHT_RESTORE_MS
+    ) {
+      isLightRestoring = false;
+      lightRestoreStartedAt = 0;
+    }
+  }
+
   function drawSpacedText(text: string, x: number, y: number, tracking: number) {
     const chars = [...text];
     const totalWidth =
@@ -227,6 +477,9 @@
       returnAnimDuration > 0 ||
       isDraggingNeedle ||
       isBrakingPlatter ||
+      swapAnim !== 'idle' ||
+      isSwapSettling ||
+      isLightRestoring ||
       localPlatterBrakeRate < 0.999 ||
       Math.abs(animatedArmAngle - resolveTargetArmAngle()) > 0.001
     );
@@ -336,15 +589,15 @@
 
   // 偏心孔的视觉模型：整张唱片以“一圈一次”的节奏围绕主轴轻微平移，
   // 唱臂角度也解同一个几何约束，这样两者会保持同相。
-  function getRecordCenterOffsetNorm() {
+  function getRecordCenterOffsetNorm(angle: number = platAngle) {
     return {
-      x: Math.cos(platAngle) * RECORD_ECCENTRICITY_NORM,
-      y: Math.sin(platAngle) * RECORD_ECCENTRICITY_NORM,
+      x: Math.cos(angle) * RECORD_ECCENTRICITY_NORM,
+      y: Math.sin(angle) * RECORD_ECCENTRICITY_NORM,
     };
   }
 
-  function getRecordCenterOffsetPx(discRadius: number) {
-    const offset = getRecordCenterOffsetNorm();
+  function getRecordCenterOffsetPx(discRadius: number, angle: number = platAngle) {
+    const offset = getRecordCenterOffsetNorm(angle);
     return {
       x: offset.x * discRadius,
       y: offset.y * discRadius,
@@ -623,7 +876,10 @@
     );
   }
 
-  function paintFrame({ rebuildLayers = true }: { rebuildLayers?: boolean } = {}) {
+  function paintFrame({
+    rebuildLayers = true,
+    timestamp = performance.now(),
+  }: { rebuildLayers?: boolean; timestamp?: number } = {}) {
     if (!ctx || drawW === 0 || drawH === 0) return;
 
     const W = drawW;
@@ -665,7 +921,7 @@
     } else {
       drawPlatterStaticHighlights(W, H);
     }
-    if (swapAnim === 'idle') {
+    if (swapAnim === 'idle' && !isSwapSettling) {
       if (discShadowLayer) {
         ctx.save();
         ctx.translate(recordOffset.x, recordOffset.y);
@@ -688,12 +944,20 @@
 
       if (discLightingLayer) {
         ctx.save();
+        ctx.globalAlpha *= getDiscLightingAlpha(timestamp);
         ctx.translate(recordOffset.x, recordOffset.y);
         ctx.drawImage(discLightingLayer, 0, 0, W, H);
         ctx.restore();
       } else {
+        ctx.save();
+        ctx.globalAlpha *= getDiscLightingAlpha(timestamp);
         drawDiscLightingLayer(W, H);
+        ctx.restore();
       }
+    } else if (swapAnim !== 'idle') {
+      drawSwapDiscAnimation(W, H, timestamp);
+    } else if (isSwapSettling) {
+      drawSwapSettleDisc(W, H, timestamp);
     }
 
     if (spindleLayer) {
@@ -819,8 +1083,9 @@
       }
     }
 
-    paintFrame();
+    paintFrame({ timestamp });
     lastPaintTimestamp = timestamp;
+    updateTransitionLightingState(timestamp);
 
     if (isAnimating()) {
       animationId = requestAnimationFrame(draw);
@@ -1343,9 +1608,14 @@
   function drawDisc(
     W: number,
     H: number,
-    options: { applyRotation?: boolean; includeLighting?: boolean; applyEccentricity?: boolean } = {},
+    options: {
+      applyRotation?: boolean;
+      includeLighting?: boolean;
+      applyEccentricity?: boolean;
+      geometryOverride?: { cx: number; cy: number; discRadius: number; platterRadius?: number };
+    } = {},
   ) {
-    const { cx, cy, discRadius: r } = getTurntableGeometry(W, H);
+    const { cx, cy, discRadius: r } = options.geometryOverride ?? getTurntableGeometry(W, H);
     const playableInnerRadius = side ? getPlayableInnerRadius(side.totalDuration) : GROOVE_INNER_RADIUS;
     const applyRotation = options.applyRotation ?? true;
     const includeLighting = options.includeLighting ?? true;
@@ -1507,18 +1777,17 @@
 
     ctx.globalCompositeOperation = 'screen';
 
-    // Near-white specular — the lead-in rim is an unrecorded mirror surface.
-    // Peak approaches pure white; drops off sharply on the shadow side.
+    // Soft specular — a faint sheen, not a chrome mirror. Warm tone, low peak.
     const specular = ctx.createConicGradient(-Math.PI * 0.32, 0, 0);
-    specular.addColorStop(0,    'rgba(255,255,255,0)');
-    specular.addColorStop(0.07, 'rgba(255,255,255,0.04)');
-    specular.addColorStop(0.16, 'rgba(255,255,255,0.94)');
-    specular.addColorStop(0.22, 'rgba(255,255,252,0.48)');
-    specular.addColorStop(0.34, 'rgba(255,252,244,0.09)');
-    specular.addColorStop(0.58, 'rgba(255,252,244,0.04)');
-    specular.addColorStop(0.72, 'rgba(255,252,244,0.22)');
-    specular.addColorStop(0.83, 'rgba(255,252,244,0.06)');
-    specular.addColorStop(1,    'rgba(255,255,255,0)');
+    specular.addColorStop(0,    'rgba(255,244,222,0)');
+    specular.addColorStop(0.07, 'rgba(255,244,222,0.015)');
+    specular.addColorStop(0.16, 'rgba(255,244,222,0.20)');
+    specular.addColorStop(0.22, 'rgba(255,242,218,0.11)');
+    specular.addColorStop(0.34, 'rgba(255,240,214,0.03)');
+    specular.addColorStop(0.58, 'rgba(255,240,214,0.015)');
+    specular.addColorStop(0.72, 'rgba(255,240,214,0.07)');
+    specular.addColorStop(0.83, 'rgba(255,240,214,0.02)');
+    specular.addColorStop(1,    'rgba(255,244,222,0)');
     ctx.fillStyle = specular;
     ctx.fillRect(-discRadius, -discRadius, discRadius * 2, discRadius * 2);
 
@@ -1541,17 +1810,17 @@
 
     ctx.globalCompositeOperation = 'screen';
 
-    // Slightly less intense than the outer rim — same mirror finish, narrower ring.
+    // Faint sheen on the dead-wax ring — narrower and dimmer than the rim.
     const specular = ctx.createConicGradient(-Math.PI * 0.32, 0, 0);
-    specular.addColorStop(0,    'rgba(255,255,255,0)');
-    specular.addColorStop(0.08, 'rgba(255,255,255,0.03)');
-    specular.addColorStop(0.17, 'rgba(255,255,254,0.76)');
-    specular.addColorStop(0.23, 'rgba(255,255,250,0.36)');
-    specular.addColorStop(0.38, 'rgba(255,252,242,0.07)');
-    specular.addColorStop(0.60, 'rgba(255,252,242,0.03)');
-    specular.addColorStop(0.74, 'rgba(255,252,242,0.18)');
-    specular.addColorStop(0.85, 'rgba(255,252,242,0.05)');
-    specular.addColorStop(1,    'rgba(255,255,255,0)');
+    specular.addColorStop(0,    'rgba(255,244,222,0)');
+    specular.addColorStop(0.08, 'rgba(255,244,222,0.012)');
+    specular.addColorStop(0.17, 'rgba(255,244,222,0.14)');
+    specular.addColorStop(0.23, 'rgba(255,242,218,0.08)');
+    specular.addColorStop(0.38, 'rgba(255,240,214,0.025)');
+    specular.addColorStop(0.60, 'rgba(255,240,214,0.012)');
+    specular.addColorStop(0.74, 'rgba(255,240,214,0.055)');
+    specular.addColorStop(0.85, 'rgba(255,240,214,0.018)');
+    specular.addColorStop(1,    'rgba(255,244,222,0)');
     ctx.fillStyle = specular;
     ctx.fillRect(-discRadius, -discRadius, discRadius * 2, discRadius * 2);
 
@@ -1720,10 +1989,17 @@
     ctx.translate(cx, cy);
     ctx.globalCompositeOperation = 'screen';
 
-    const grooveInner = r * LABEL_RADIUS * 1.22;
-    const grooveOuter = r * 0.985;
+    const playableInner = side ? getPlayableInnerRadius(side.totalDuration) : GROOVE_INNER_RADIUS;
+    const grooveInner = r * playableInner;
+    const grooveOuter = r * GROOVE_OUTER_RADIUS;
     drawOuterLeadInHighlight(r, r * GROOVE_OUTER_RADIUS);
     drawDeadWaxHighlight(r);
+
+    ctx.beginPath();
+    ctx.arc(0, 0, grooveOuter, 0, TAU);
+    ctx.arc(0, 0, grooveInner, 0, TAU, true);
+    ctx.clip('evenodd');
+
     const highlightBands = [
       { start: -2.44, end: -1.26, peak: -1.82, alpha: 0.28, width: 1.4, feather: 0.22 },
       { start: -1.10, end: -0.70, peak: -0.94, alpha: 0.10, width: 0.88, feather: 0.14 },
@@ -1774,7 +2050,7 @@
     blendWash.addColorStop(1, 'rgba(255, 248, 228, 0)');
     ctx.fillStyle = blendWash;
     ctx.beginPath();
-    ctx.arc(0, 0, r * 0.985, 0, Math.PI * 2);
+    ctx.arc(0, 0, grooveOuter, 0, Math.PI * 2);
     ctx.arc(0, 0, grooveInner, 0, Math.PI * 2, true);
     ctx.fill('evenodd');
     ctx.restore();
@@ -1847,9 +2123,14 @@
     ctx.fill();
   }
 
-  function drawTrackMarkers(W: number, H: number, applyEccentricity: boolean = true) {
+  function drawTrackMarkers(
+    W: number,
+    H: number,
+    applyEccentricity: boolean = true,
+    geometryOverride?: { cx: number; cy: number; discRadius: number },
+  ) {
     if (!side || side.tracks.length < 2) return;
-    const { cx, cy, discRadius: r } = getTurntableGeometry(W, H);
+    const { cx, cy, discRadius: r } = geometryOverride ?? getTurntableGeometry(W, H);
     const recordOffset = applyEccentricity ? getRecordCenterOffsetPx(r) : { x: 0, y: 0 };
     const grooveOuterPx = r * GROOVE_OUTER_RADIUS;
     const grooveInnerPx = r * getPlayableInnerRadius(side.totalDuration);
@@ -2317,19 +2598,239 @@
   function loadCoverImage(src: string | undefined) {
     if (!src) {
       coverImage = null;
+      coverImageLoadedSrc = undefined;
+      coverImagePendingSrc = undefined;
+      coverImageFailedSrc = undefined;
       coverImageVersion += 1;
       discBaseLayerDirty = true;
+      requestDraw();
       return;
     }
 
+    if (coverImage && coverImageLoadedSrc === src) {
+      return;
+    }
+
+    coverImage = null;
+    coverImageLoadedSrc = undefined;
+    coverImagePendingSrc = src;
+    coverImageFailedSrc = undefined;
+    coverImageVersion += 1;
+    discBaseLayerDirty = true;
+    requestDraw();
+
     const image = new Image();
     image.onload = () => {
+      if (coverImagePendingSrc !== src) return;
       coverImage = image;
+      coverImageLoadedSrc = src;
+      coverImagePendingSrc = undefined;
+      coverImageFailedSrc = undefined;
       coverImageVersion += 1;
       discBaseLayerDirty = true;
       scheduleCanvasSync();
     };
+    image.onerror = () => {
+      if (coverImagePendingSrc !== src) return;
+      coverImage = null;
+      coverImageLoadedSrc = undefined;
+      coverImagePendingSrc = undefined;
+      coverImageFailedSrc = src;
+      coverImageVersion += 1;
+      discBaseLayerDirty = true;
+      requestDraw();
+    };
     image.src = src;
+  }
+
+  // ── 切换动画盘面层：不再生成 DOM 图片快照，直接复用/生成 live canvas 同尺寸图层 ──
+  type SwapDiscVisual = {
+    base: HTMLCanvasElement | null;
+    lighting: HTMLCanvasElement | null;
+    angle: number;
+  };
+
+  let swapFromVisual: SwapDiscVisual | null = null;
+  let swapToVisual: SwapDiscVisual | null = null;
+  let swapAnimStartedAt = 0;
+  let swapSettleStartedAt = 0;
+  let isSwapSettling = false;
+  let isLightRestoring = false;
+  let lightRestoreStartedAt = 0;
+  let swapVisualToken = 0;
+  let prevSwapAnim: 'idle' | 'swap' | 'flip' = 'idle';
+
+  const SWAP_ANIMATION_MS = 3000;
+  const FLIP_ANIMATION_MS = 1600;
+  const SWAP_LIGHT_MIN_ALPHA = 0.02;
+  const SWAP_SETTLE_MIN_MS = 220;
+  const SWAP_LIGHT_RESTORE_MS = 1800;
+
+  function loadImageAsync(src: string): Promise<HTMLImageElement> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('cover load failed'));
+      img.src = src;
+    });
+  }
+
+  function renderDiscBaseLayerForCurrentState(): HTMLCanvasElement | null {
+    if (!ctx) return null;
+    const previousCtx = ctx;
+    const layer = createRenderLayer();
+    if (!layer) return null;
+    drawDisc(drawW, drawH, {
+      applyRotation: false,
+      includeLighting: false,
+      applyEccentricity: false,
+    });
+    if (side) drawTrackMarkers(drawW, drawH, false);
+    return finalizeRenderLayer(layer, previousCtx);
+  }
+
+  function renderDiscLightingLayerForCurrentState(): HTMLCanvasElement | null {
+    if (!ctx) return null;
+    const previousCtx = ctx;
+    const layer = createRenderLayer();
+    if (!layer) return null;
+    drawDiscLightingLayer(drawW, drawH, false);
+    return finalizeRenderLayer(layer, previousCtx);
+  }
+
+  function renderDiscVisualForState(opts: {
+    targetSide: DiscSide | null;
+    targetDiscArtworkUrl: string | undefined;
+    targetCoverImage: HTMLImageElement | null;
+    targetArtworkMode: DiscArtworkMode;
+    angle: number;
+  }): SwapDiscVisual | null {
+    if (!ctx || !drawW || !drawH) return null;
+
+    const savedSide = side;
+    const savedCover = coverImage;
+    const savedArtUrl = discArtworkUrl;
+    const savedArtMode = artworkMode;
+
+    side = opts.targetSide;
+    coverImage = opts.targetCoverImage;
+    discArtworkUrl = opts.targetDiscArtworkUrl;
+    artworkMode = opts.targetArtworkMode;
+
+    let visual: SwapDiscVisual | null = null;
+    try {
+      visual = {
+        base: renderDiscBaseLayerForCurrentState(),
+        lighting: renderDiscLightingLayerForCurrentState(),
+        angle: opts.angle,
+      };
+    } finally {
+      side = savedSide;
+      coverImage = savedCover;
+      discArtworkUrl = savedArtUrl;
+      artworkMode = savedArtMode;
+    }
+
+    return visual;
+  }
+
+  function getCurrentDiscVisual(angle: number): SwapDiscVisual | null {
+    ensureRenderLayers();
+    if (!discBaseLayer && !discLightingLayer) return null;
+    return {
+      base: discBaseLayer,
+      lighting: discLightingLayer,
+      angle,
+    };
+  }
+
+  async function resolveDiscArtworkImage(src: string | undefined): Promise<HTMLImageElement | null> {
+    if (!src) return null;
+    if (coverImage && coverImageLoadedSrc === src) return coverImage;
+    try {
+      return await loadImageAsync(src);
+    } catch {
+      return null;
+    }
+  }
+
+  function clearSwapSettle() {
+    isSwapSettling = false;
+    swapSettleStartedAt = 0;
+    if (swapAnim === 'idle') {
+      swapFromVisual = null;
+      swapToVisual = null;
+    }
+  }
+
+  function beginSwapSettle(endedAnim: 'swap' | 'flip') {
+    if (!swapToVisual && endedAnim === 'flip') {
+      swapToVisual = swapFromVisual;
+    }
+    if (!swapToVisual && !swapFromVisual) {
+      clearSwapSettle();
+      return;
+    }
+
+    isSwapSettling = true;
+    isLightRestoring = false;
+    lightRestoreStartedAt = 0;
+    swapSettleStartedAt = performance.now();
+    requestDraw();
+  }
+
+  async function generateSwapVisuals() {
+    const token = ++swapVisualToken;
+    const angle = platAngle;
+    const fromFallbackSide = swapFromSide ?? side;
+    const fromFallbackDiscArtworkUrl = swapFromDiscArtworkUrl;
+
+    clearSwapSettle();
+    isLightRestoring = false;
+    lightRestoreStartedAt = 0;
+    swapAnimStartedAt = performance.now();
+    swapFromVisual = getCurrentDiscVisual(angle);
+    swapToVisual = null;
+    requestDraw();
+
+    if (!swapFromVisual) {
+      const fromImg = await resolveDiscArtworkImage(fromFallbackDiscArtworkUrl);
+      if (token !== swapVisualToken) return;
+      swapFromVisual = renderDiscVisualForState({
+        targetSide: fromFallbackSide,
+        targetDiscArtworkUrl: fromFallbackDiscArtworkUrl,
+        targetCoverImage: fromImg,
+        targetArtworkMode: artworkMode,
+        angle,
+      });
+      requestDraw();
+    }
+
+    const toImg = await resolveDiscArtworkImage(swapToDiscArtworkUrl);
+    if (token !== swapVisualToken) return;
+
+    swapToVisual = renderDiscVisualForState({
+      targetSide: swapToSide ?? side,
+      targetDiscArtworkUrl: swapToDiscArtworkUrl,
+      targetCoverImage: toImg,
+      targetArtworkMode: artworkMode,
+      angle,
+    });
+    requestDraw();
+  }
+
+  $: if (swapAnim !== prevSwapAnim) {
+    const endedAnim = swapAnim === 'idle' && prevSwapAnim !== 'idle'
+      ? prevSwapAnim
+      : null;
+    const startedAnim = swapAnim !== 'idle' && prevSwapAnim === 'idle';
+    prevSwapAnim = swapAnim;
+    if (startedAnim) {
+      void generateSwapVisuals();
+    } else if (endedAnim) {
+      beginSwapSettle(endedAnim);
+      swapVisualToken += 1;
+    }
   }
 
   onMount(() => {
@@ -2432,88 +2933,6 @@
           </div>
         {/if}
 
-        <!-- 唱片圆盘（覆盖在 canvas 上，用于动画） -->
-        <div
-          class="swap-vinyl"
-          class:swap-vinyl--outgoing={swapAnim === 'swap'}
-        >
-          <span
-            class="swap-vinyl-face swap-vinyl-face--front"
-            class:swap-vinyl-face--overlay-art={artworkMode === 'overlay' && !!swapFromDiscArtworkUrl}
-            aria-hidden="true"
-          >
-            {#if artworkMode === 'overlay' && swapFromDiscArtworkUrl}
-              <img src={swapFromDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--base" draggable="false" />
-              <img src={swapFromDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--soft" draggable="false" />
-              <span class="swap-vinyl-body-resin" aria-hidden="true"></span>
-            {/if}
-            <span class="swap-vinyl-grooves" aria-hidden="true"></span>
-            <span class="swap-vinyl-label" aria-hidden="true">
-              {#if artworkMode === 'centered' && swapFromDiscArtworkUrl}
-                <img src={swapFromDiscArtworkUrl} alt="" class="swap-vinyl-label-art" draggable="false" />
-              {/if}
-              <span class="swap-vinyl-label-shade" aria-hidden="true"></span>
-              {#if swapFromSideLabel}
-                <span class="swap-vinyl-side-text" aria-hidden="true">SIDE {swapFromSideLabel}</span>
-              {/if}
-            </span>
-            <span class="swap-vinyl-spindle" aria-hidden="true"></span>
-            <span class="swap-vinyl-sheen" aria-hidden="true"></span>
-          </span>
-          {#if swapAnim === 'flip'}
-            <span
-              class="swap-vinyl-face swap-vinyl-face--back"
-              class:swap-vinyl-face--overlay-art={artworkMode === 'overlay' && !!swapToDiscArtworkUrl}
-              aria-hidden="true"
-            >
-              {#if artworkMode === 'overlay' && swapToDiscArtworkUrl}
-                <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--base" draggable="false" />
-                <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--soft" draggable="false" />
-                <span class="swap-vinyl-body-resin" aria-hidden="true"></span>
-              {/if}
-              <span class="swap-vinyl-grooves" aria-hidden="true"></span>
-              <span class="swap-vinyl-label" aria-hidden="true">
-                {#if artworkMode === 'centered' && swapToDiscArtworkUrl}
-                  <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-label-art" draggable="false" />
-                {/if}
-                <span class="swap-vinyl-label-shade" aria-hidden="true"></span>
-                {#if swapToSideLabel}
-                  <span class="swap-vinyl-side-text" aria-hidden="true">SIDE {swapToSideLabel}</span>
-                {/if}
-              </span>
-              <span class="swap-vinyl-spindle" aria-hidden="true"></span>
-              <span class="swap-vinyl-sheen" aria-hidden="true"></span>
-            </span>
-          {/if}
-        </div>
-
-        {#if swapAnim === 'swap'}
-          <div class="swap-vinyl swap-vinyl--incoming">
-            <span
-              class="swap-vinyl-face swap-vinyl-face--front"
-              class:swap-vinyl-face--overlay-art={artworkMode === 'overlay' && !!swapToDiscArtworkUrl}
-              aria-hidden="true"
-            >
-              {#if artworkMode === 'overlay' && swapToDiscArtworkUrl}
-                <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--base" draggable="false" />
-                <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-body-art swap-vinyl-body-art--soft" draggable="false" />
-                <span class="swap-vinyl-body-resin" aria-hidden="true"></span>
-              {/if}
-              <span class="swap-vinyl-grooves" aria-hidden="true"></span>
-              <span class="swap-vinyl-label" aria-hidden="true">
-                {#if artworkMode === 'centered' && swapToDiscArtworkUrl}
-                  <img src={swapToDiscArtworkUrl} alt="" class="swap-vinyl-label-art" draggable="false" />
-                {/if}
-                <span class="swap-vinyl-label-shade" aria-hidden="true"></span>
-                {#if swapToSideLabel}
-                  <span class="swap-vinyl-side-text" aria-hidden="true">SIDE {swapToSideLabel}</span>
-                {/if}
-              </span>
-              <span class="swap-vinyl-spindle" aria-hidden="true"></span>
-              <span class="swap-vinyl-sheen" aria-hidden="true"></span>
-            </span>
-          </div>
-        {/if}
       </div>
     {/if}
 
@@ -2815,7 +3234,7 @@
      ────────────────────────────────────────────────────────────────
      定位基准（归一化来自 Turntable.svelte canvas 常量）：
        盘片圆心    CENTER_X=50%  CENTER_Y=46.2%
-       盘片半径    DISC_RADIUS=38.2%
+       盘片半径    DISC_RADIUS=42%
        标签半径    LABEL_RADIUS=0.35 → 占盘片直径 35%
   ════════════════════════════════════════════════════════════════ */
 
@@ -2829,19 +3248,19 @@
 
   /* ── 封套 ──────────────────────────────────────────────────── */
   /*
-   * 与唱片圆盘完全同尺寸、同位置（left=11.8% top=8% width=76.4%）。
+   * 与唱片圆盘完全同尺寸、同位置（left=8% top=4.2% width=84%）。
    * 动画通过 translateY 控制入场 / 离场；
    * swap-overlay overflow:hidden 负责裁切顶部，使封套仅露出下半段。
    *
    * 静止帧（translateY(-62%)）时：
-   *   封套底边 = 8% + 76.4% − 62%×76.4% = 37%
+   *   封套底边 = 4.2% + 84% − 62%×84% ≈ 36.1%
    *   约 48% 的封套（下半部分）在帧内可见。
    */
   .swap-sleeve {
     position: absolute;
-    left: 11.8%;
-    top: 8%;
-    width: 76.4%;
+    left: 8%;
+    top: 4.2%;
+    width: 84%;
     aspect-ratio: 1;
     z-index: 2;
     border-radius: 6px;
@@ -2922,265 +3341,6 @@
       );
   }
 
-  /* ── 黑胶唱片 ──────────────────────────────────────────────── */
-  /*
-   * 与 canvas 中的盘片对齐：
-   *   left = 50% − 38.2% = 11.8%
-   *   top  = 46.2% − 38.2% = 8%
-   *   width/height = 76.4%
-   */
-  .swap-vinyl {
-    position: absolute;
-    left: 11.8%;
-    top: 8%;
-    width: 76.4%;
-    aspect-ratio: 1;
-    z-index: 1;
-    pointer-events: none;
-    transform-style: preserve-3d;
-    transform-origin: 50% 50%;
-  }
-
-  .swap-vinyl--outgoing {
-    z-index: 4;
-  }
-
-  .swap-vinyl--incoming {
-    z-index: 3;
-    opacity: 0;
-  }
-
-  .swap-vinyl-face {
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    overflow: hidden;
-    background:
-      radial-gradient(circle at 36% 34%, #2e2c26, #18160f 36%, #0d0b08 100%);
-    box-shadow: 0 14px 48px rgba(0, 0, 0, 0.72);
-    backface-visibility: hidden;
-    -webkit-backface-visibility: hidden;
-  }
-
-  .swap-vinyl-face--overlay-art {
-    background:
-      radial-gradient(circle at 36% 34%, #24211d, #14110d 38%, #0a0806 100%);
-  }
-
-  .swap-overlay--swap .swap-vinyl-face {
-    box-shadow: none;
-  }
-
-  .swap-vinyl-face--back {
-    transform: rotateX(180deg);
-  }
-
-  /* 黑胶纹路（模拟刻槽高频反光） */
-  .swap-vinyl-grooves {
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    background:
-      repeating-radial-gradient(
-        circle at center,
-        rgba(255, 244, 216, 0) 0%,
-        rgba(255, 244, 216, 0) 0.72%,
-        rgba(255, 244, 216, 0.044) 0.74%,
-        rgba(255, 244, 216, 0.044) 0.86%
-      );
-    -webkit-mask-image: radial-gradient(
-      circle at center,
-      transparent 0%,
-      transparent 41.5%,
-      #000 43%,
-      #000 96.8%,
-      transparent 98.6%
-    );
-    mask-image: radial-gradient(
-      circle at center,
-      transparent 0%,
-      transparent 41.5%,
-      #000 43%,
-      #000 96.8%,
-      transparent 98.6%
-    );
-    opacity: 0.9;
-    z-index: 2;
-    pointer-events: none;
-  }
-
-  .swap-vinyl-grooves::before,
-  .swap-vinyl-grooves::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    pointer-events: none;
-  }
-
-  .swap-vinyl-grooves::before {
-    background:
-      radial-gradient(
-        circle at center,
-        transparent 0%,
-        transparent 34.5%,
-        rgba(255, 242, 205, 0.055) 35.1%,
-        transparent 35.8%
-      ),
-      radial-gradient(
-        circle at center,
-        transparent 0%,
-        transparent 41.6%,
-        rgba(255, 240, 205, 0.07) 42.2%,
-        transparent 42.8%
-      ),
-      radial-gradient(
-        circle at center,
-        transparent 0%,
-        transparent 47.2%,
-        rgba(255, 236, 196, 0.03) 47.7%,
-        transparent 48.1%
-      );
-    opacity: 0.9;
-    mix-blend-mode: screen;
-  }
-
-  .swap-vinyl-grooves::after {
-    background:
-      radial-gradient(
-        circle at center,
-        transparent 0%,
-        transparent 83.6%,
-        rgba(255, 246, 222, 0.06) 85.1%,
-        rgba(255, 246, 222, 0.018) 88%,
-        transparent 92%
-      ),
-      radial-gradient(
-        circle at 34% 28%,
-        rgba(255, 248, 228, 0.07) 0%,
-        rgba(255, 248, 228, 0.018) 18%,
-        transparent 42%
-      );
-    opacity: 0.92;
-    mix-blend-mode: screen;
-  }
-
-  .swap-vinyl-body-art {
-    position: absolute;
-    inset: -7%;
-    width: 114%;
-    height: 114%;
-    object-fit: cover;
-    border-radius: 50%;
-    pointer-events: none;
-  }
-
-  .swap-vinyl-body-art--base {
-    z-index: 0;
-    opacity: 0.82;
-    filter: blur(18px) saturate(1.18) contrast(1.05) brightness(0.82);
-    mix-blend-mode: screen;
-  }
-
-  .swap-vinyl-body-art--soft {
-    z-index: 1;
-    opacity: 0.28;
-    filter: blur(4px) saturate(1.3) contrast(1.08) brightness(0.88);
-    mix-blend-mode: soft-light;
-  }
-
-  .swap-vinyl-body-resin {
-    position: absolute;
-    inset: 0;
-    z-index: 1;
-    border-radius: 50%;
-    background:
-      radial-gradient(circle at 50% 50%, rgba(10, 8, 7, 0.28) 0%, rgba(10, 8, 7, 0.16) 26%, rgba(10, 8, 7, 0) 41%),
-      radial-gradient(circle at 50% 50%, rgba(255, 246, 225, 0) 58%, rgba(255, 246, 225, 0.035) 84%, rgba(0, 0, 0, 0.18) 100%),
-      radial-gradient(circle at 32% 28%, rgba(255, 250, 238, 0.06), rgba(255, 250, 238, 0) 40%);
-    pointer-events: none;
-  }
-
-  /* 标签区（LABEL_RADIUS = 0.35 → 直径占唱片 35%） */
-  .swap-vinyl-label {
-    position: absolute;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    width: 35%;
-    aspect-ratio: 1;
-    border-radius: 50%;
-    overflow: hidden;
-    background: radial-gradient(circle at 50% 36%, #c44030, #7a2010 100%);
-    box-shadow: inset 0 0 0 1px rgba(255, 220, 180, 0.14);
-    z-index: 3;
-  }
-
-  .swap-vinyl-face--overlay-art .swap-vinyl-label {
-    background: radial-gradient(circle at 50% 36%, rgba(22, 18, 16, 0.72), rgba(10, 8, 7, 0.92) 100%);
-    box-shadow:
-      inset 0 0 0 1px rgba(255, 240, 210, 0.12),
-      0 0 0 1px rgba(0, 0, 0, 0.22);
-  }
-
-  .swap-vinyl-label-art {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    opacity: 1;
-    display: block;
-  }
-
-  .swap-vinyl-label-shade {
-    position: absolute;
-    inset: 0;
-    background: radial-gradient(circle at 50% 50%, rgba(0, 0, 0, 0.16), rgba(0, 0, 0, 0.38));
-  }
-
-  .swap-vinyl-side-text {
-    position: absolute;
-    left: 50%;
-    top: 68%;
-    transform: translateX(-50%);
-    font-family: "Courier New", monospace;
-    font-size: clamp(10px, 0.92vw, 15px);
-    font-weight: 700;
-    letter-spacing: 0.22em;
-    color: rgba(255, 240, 210, 0.8);
-    text-shadow: 0 0 8px rgba(0, 0, 0, 0.42);
-    white-space: nowrap;
-  }
-
-  /* 中心孔 */
-  .swap-vinyl-spindle {
-    position: absolute;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    width: 2%;
-    aspect-ratio: 1;
-    border-radius: 50%;
-    background: #080608;
-    z-index: 5;
-  }
-
-  /* 碟面掠射高光 */
-  .swap-vinyl-sheen {
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    background:
-      conic-gradient(
-        from -55deg at 50% 50%,
-        transparent 0deg,
-        rgba(255, 248, 228, 0.07) 18deg,
-        transparent 40deg,
-        transparent 180deg,
-        rgba(255, 248, 228, 0.04) 198deg,
-        transparent 218deg
-      );
-    pointer-events: none;
-    z-index: 4;
-  }
-
   /* ── 换碟动画（swap）──────────────────────────────────────── */
   /*
    * 封套（与唱片同尺寸）：从顶部滑入，translateY(-62%) 时
@@ -3197,15 +3357,6 @@
     100% { transform: translateY(-110%); opacity: 0; }
   }
 
-  @keyframes vinyl-outgoing {
-    0%   { transform: translateY(0) scale(1); opacity: 1; }
-    12%  { transform: translateY(0) scale(1); opacity: 1; }
-    26%  { transform: translateY(-30%) scale(1.02); opacity: 1; }
-    40%  { transform: translateY(-62%) scale(1); opacity: 1; }
-    52%  { transform: translateY(-110%) scale(0.98); opacity: 0; }
-    100% { transform: translateY(-110%) scale(0.98); opacity: 0; }
-  }
-
   @keyframes sleeve-incoming {
     0%   { transform: translateY(-110%); opacity: 0; }
     46%  { transform: translateY(-110%); opacity: 0; }
@@ -3214,47 +3365,12 @@
     100% { transform: translateY(-110%); opacity: 0; }
   }
 
-  @keyframes vinyl-incoming {
-    0%   { transform: translateY(-110%) scale(0.98); opacity: 0; }
-    48%  { transform: translateY(-110%) scale(0.98); opacity: 0; }
-    62%  { transform: translateY(-62%) scale(1); opacity: 1; }
-    76%  { transform: translateY(-30%) scale(1.02); opacity: 1; }
-    90%  { transform: translateY(0) scale(1); opacity: 1; }
-    100% { transform: translateY(0) scale(1); opacity: 1; }
-  }
-
   .swap-overlay--swap .swap-sleeve--outgoing {
     animation: sleeve-outgoing 3s cubic-bezier(0.36, 0.07, 0.19, 0.97) forwards;
   }
 
-  .swap-overlay--swap .swap-vinyl--outgoing {
-    animation: vinyl-outgoing 3s cubic-bezier(0.36, 0.07, 0.19, 0.97) forwards;
-  }
-
   .swap-overlay--swap .swap-sleeve--incoming {
     animation: sleeve-incoming 3s cubic-bezier(0.36, 0.07, 0.19, 0.97) forwards;
-  }
-
-  .swap-overlay--swap .swap-vinyl--incoming {
-    animation: vinyl-incoming 3s cubic-bezier(0.36, 0.07, 0.19, 0.97) forwards;
-  }
-
-  /* ── 翻面动画（flip）──────────────────────────────────────── */
-  /*
-   * 唱片浮起 → 中段边缘朝向（scaleX→0）→ 展示另一面 → 落回
-   * 最后淡出，露出 canvas 中已更新的盘面。
-   * 总时长 1 600 ms
-   */
-  @keyframes vinyl-flip-side {
-    0%   { transform: translateY(0)    perspective(720px) rotateX(0deg)   scale(1);    }
-    18%  { transform: translateY(-8%)  perspective(720px) rotateX(0deg)   scale(1.03); }
-    50%  { transform: translateY(-12%) perspective(720px) rotateX(92deg)  scale(1.02); }
-    82%  { transform: translateY(-7%)  perspective(720px) rotateX(180deg) scale(1.03); }
-    100% { transform: translateY(0)    perspective(720px) rotateX(180deg) scale(1);    }
-  }
-
-  .swap-overlay--flip .swap-vinyl {
-    animation: vinyl-flip-side 1.6s cubic-bezier(0.42, 0, 0.58, 1) forwards;
   }
 
 </style>

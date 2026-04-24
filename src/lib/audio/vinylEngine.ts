@@ -38,6 +38,10 @@ export class VinylEngine {
 
   private readonly wowFrequencyHz = 0.095; // 约 10.5 秒一个周期，避免明显跑调
   private readonly wowDepth = 0.00075;     // 0.075% 音高漂移
+  private readonly crackleMinDelayMs = 5000;
+  private readonly crackleMaxDelayMs = 18000;
+  private readonly crackleMinGain = 0.035;
+  private readonly crackleMaxGain = 0.12;
 
   // 曲目 buffer 缓存（keyed by track.id，存切片后的 buffer）
   private trackBuffers: Map<string, AudioBuffer> = new Map();
@@ -455,8 +459,10 @@ export class VinylEngine {
   private scheduleCrackles(): void {
     if (!this.isPlaying) return;
 
-    // 随机间隔 1~8 秒触发一次爆音
-    const delay = (1 + Math.random() * 7) * 1000;
+    // 稀疏的灰尘爆音，避免持续抢占音乐。
+    const delay =
+      this.crackleMinDelayMs +
+      Math.random() * (this.crackleMaxDelayMs - this.crackleMinDelayMs);
     this.crackleTimer = setTimeout(() => {
       if (this.isPlaying) {
         this.triggerCrackle();
@@ -483,7 +489,9 @@ export class VinylEngine {
 
     const gain = this.ctx.createGain();
     // 爆音音量有随机性
-    gain.gain.value = 0.08 + Math.random() * 0.18;
+    gain.gain.value =
+      this.crackleMinGain +
+      Math.random() * (this.crackleMaxGain - this.crackleMinGain);
 
     // 高频滤波，给爆音"噼啪"质感
     const filter = this.ctx.createBiquadFilter();

@@ -31,6 +31,7 @@
   } from "./lib/library/persistence";
   import AlbumWorkshop from "./lib/library/AlbumWorkshop.svelte";
   import Stage from "./lib/cabinet/Stage.svelte";
+  import AmbientBackdrop from "./lib/cabinet/AmbientBackdrop.svelte";
   import Cabinet from "./lib/cabinet/Cabinet.svelte";
   import Console from "./lib/cabinet/Console.svelte";
   import CabinetShelf from "./lib/cabinet/CabinetShelf.svelte";
@@ -83,6 +84,23 @@
   let workshopMode: "home" | "import" | "edit" = "home";
   let workshopAlbumId: string | null = null;
   let categoryManagerOpen = false;
+  type TrackCardView = {
+    key: string;
+    albumId: string | null;
+    sideIndex: number;
+    side: DiscSide;
+  };
+  type TrackCardRole = "steady" | "out" | "in";
+  type TrackCardRenderItem = TrackCardView & {
+    role: TrackCardRole;
+    kind: "idle" | "swap" | "flip";
+  };
+  let trackCardTransition: {
+    kind: "swap" | "flip";
+    from: TrackCardView | null;
+    to: TrackCardView;
+  } | null = null;
+  let trackCardTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── 分类相关 ──────────────────────────────────────────────────
   $: availableCategories = [
@@ -150,6 +168,8 @@
   let turntableSwapToDiscArt: string | undefined = undefined;
   let turntableSwapFromSideLabel: string | undefined = undefined;
   let turntableSwapToSideLabel: string | undefined = undefined;
+  let turntableSwapFromSide: DiscSide | null = null;
+  let turntableSwapToSide: DiscSide | null = null;
   let swapAnimTimer: ReturnType<typeof setTimeout> | null = null;
   let isSwitchingSide = false;
 
@@ -169,6 +189,49 @@
   const TURNTABLE_SWAP_MS = 3000;
   const TURNTABLE_FLIP_MS = 1600;
 
+  function createTrackCardView(
+    albumId: string | null,
+    sideIndex: number,
+    sideRef: DiscSide,
+  ): TrackCardView {
+    return {
+      key: [
+        albumId ?? "album",
+        sideIndex,
+        sideRef.label,
+        sideRef.totalDuration,
+        sideRef.tracks.map((track) => `${track.id}:${track.duration}`).join("|"),
+      ].join("::"),
+      albumId,
+      sideIndex,
+      side: sideRef,
+    };
+  }
+
+  function clearTrackCardTransition() {
+    if (trackCardTimer) {
+      clearTimeout(trackCardTimer);
+      trackCardTimer = null;
+    }
+    trackCardTransition = null;
+  }
+
+  function startTrackCardTransition(
+    kind: "swap" | "flip",
+    from: TrackCardView | null,
+    to: TrackCardView | null,
+  ) {
+    if (!to) return;
+    if (from?.key === to.key) return;
+    clearTrackCardTransition();
+    trackCardTransition = { kind, from, to };
+    const duration = kind === "swap" ? TURNTABLE_SWAP_MS : TURNTABLE_FLIP_MS;
+    trackCardTimer = setTimeout(() => {
+      trackCardTransition = null;
+      trackCardTimer = null;
+    }, duration + 760);
+  }
+
   function createEmptyMusicMeterLevels(): number[] {
     return Array.from({ length: MUSIC_METER_BANDS }, () => 0);
   }
@@ -177,12 +240,34 @@
     musicMeterLevels = createEmptyMusicMeterLevels();
   }
 
+  function rememberRecentPlayback(albumId: string | null | undefined) {
+    if (!albumId) return;
+    recentAlbumIds = [albumId, ...recentAlbumIds.filter((id) => id !== albumId)];
+    void recordAlbumPlay(albumId).catch((err) => {
+      console.error("记录最近播放失败", err);
+    });
+  }
+
   $: selectedAlbum =
     libraryAlbums.find((album) => album.id === selectedAlbumId) ?? null;
   $: workshopAlbum =
     libraryAlbums.find((album) => album.id === workshopAlbumId) ??
     (workshopMode === "edit" ? selectedAlbum : null);
   $: currentSide = playbackAlbum?.sides[currentSideIndex] ?? null;
+  $: liveTrackCard = currentSide
+    ? createTrackCardView(playbackAlbum?.id ?? selectedAlbumId, currentSideIndex, currentSide)
+    : null;
+  $: displayedSideIndex = trackCardTransition?.to.sideIndex ?? currentSideIndex;
+  $: trackCardItems = trackCardTransition
+    ? [
+        ...(trackCardTransition.from
+          ? [{ ...trackCardTransition.from, role: "out" as TrackCardRole, kind: trackCardTransition.kind }]
+          : []),
+        { ...trackCardTransition.to, role: "in" as TrackCardRole, kind: trackCardTransition.kind },
+      ]
+    : liveTrackCard
+      ? [{ ...liveTrackCard, role: "steady" as TrackCardRole, kind: "idle" as const }]
+      : [];
   $: isTransportActive =
     isPlaying ||
     isPlatterSpinning ||
@@ -392,6 +477,8 @@
       toDiscArtUrl?: string;
       fromSideLabel?: string;
       toSideLabel?: string;
+      fromSide?: DiscSide | null;
+      toSide?: DiscSide | null;
     } = {},
   ) {
     if (swapAnimTimer) clearTimeout(swapAnimTimer);
@@ -401,6 +488,8 @@
     turntableSwapToDiscArt = options.toDiscArtUrl;
     turntableSwapFromSideLabel = options.fromSideLabel;
     turntableSwapToSideLabel = options.toSideLabel;
+    turntableSwapFromSide = options.fromSide ?? null;
+    turntableSwapToSide = options.toSide ?? null;
     turntableSwapAnim = kind;
     const duration = kind === 'swap' ? TURNTABLE_SWAP_MS : TURNTABLE_FLIP_MS;
     swapAnimTimer = setTimeout(() => {
@@ -411,6 +500,8 @@
       turntableSwapToDiscArt = undefined;
       turntableSwapFromSideLabel = undefined;
       turntableSwapToSideLabel = undefined;
+      turntableSwapFromSide = null;
+      turntableSwapToSide = null;
     }, duration);
   }
 
@@ -453,7 +544,16 @@
       toDiscArtUrl: targetPlaybackAlbum?.discArtUrl,
       fromSideLabel: currentSide?.label,
       toSideLabel: targetPlaybackAlbum?.sides[0]?.label,
+      fromSide: currentSide ?? null,
+      toSide: targetPlaybackAlbum?.sides[0] ?? null,
     });
+    startTrackCardTransition(
+      "swap",
+      currentSide ? createTrackCardView(previousAlbum?.id ?? selectedAlbumId, currentSideIndex, currentSide) : null,
+      targetPlaybackAlbum?.sides[0]
+        ? createTrackCardView(targetAlbum?.id ?? albumId, 0, targetPlaybackAlbum.sides[0])
+        : null,
+    );
     selectedAlbumId = albumId;
     await syncSelectedAlbumToPlayer(albumId);
   }
@@ -465,9 +565,6 @@
     }
     if (!engine || !currentSide || isTransportActive) return;
     await beginPlaybackSequence();
-    void recordAlbumPlay(albumId).then(() => {
-      recentAlbumIds = [albumId, ...recentAlbumIds.filter((id) => id !== albumId)];
-    });
   }
 
   async function moveTrack(
@@ -712,6 +809,7 @@
 
     isPlaying = true;
     tonearmState = "playing";
+    rememberRecentPlayback(playbackAlbum?.id);
   }
 
   async function beginManualCueSpinup() {
@@ -779,6 +877,7 @@
     clearManualCueState();
     isPlaying = true;
     tonearmState = "playing";
+    rememberRecentPlayback(playbackAlbum?.id);
   }
 
   async function togglePlay() {
@@ -845,7 +944,18 @@
         toDiscArtUrl: playbackAlbum?.discArtUrl,
         fromSideLabel: currentSideRef?.label,
         toSideLabel: targetSideRef?.label,
+        fromSide: currentSideRef ?? null,
+        toSide: targetSideRef ?? null,
       });
+      startTrackCardTransition(
+        animKind,
+        currentSideRef
+          ? createTrackCardView(playbackAlbum.id, currentSideIndex, currentSideRef)
+          : null,
+        targetSideRef
+          ? createTrackCardView(playbackAlbum.id, index, targetSideRef)
+          : null,
+      );
 
       await Promise.all([
         engine.loadSide(targetSideRef),
@@ -869,6 +979,7 @@
   });
 
   onDestroy(() => {
+    clearTrackCardTransition();
     cancelStartupSequence();
     engine?.destroy();
   });
@@ -880,6 +991,8 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="titlebar-drag-region" on:mousedown={onTitlebarMousedown}></div>
   {/if}
+
+  <AmbientBackdrop coverUrl={selectedAlbum?.coverUrl} />
 
   <Stage>
     <Cabinet>
@@ -904,6 +1017,8 @@
           swapToDiscArtworkUrl={turntableSwapToDiscArt}
           swapFromSideLabel={turntableSwapFromSideLabel}
           swapToSideLabel={turntableSwapToSideLabel}
+          swapFromSide={turntableSwapFromSide}
+          swapToSide={turntableSwapToSide}
           onArtworkModeChange={(mode) => {
             discArtworkMode = mode;
           }}
@@ -1041,11 +1156,11 @@
                     {#each playbackAlbum.sides as side, index}
                       <button
                         class="print-side-link"
-                        class:active={index === currentSideIndex}
+                        class:active={index === displayedSideIndex}
                         type="button"
-                        disabled={isSwitchingSide || index === currentSideIndex}
+                        disabled={isSwitchingSide || index === displayedSideIndex}
                         on:click={() => void switchSide(index)}
-                        aria-current={index === currentSideIndex ? "true" : undefined}
+                        aria-current={index === displayedSideIndex ? "true" : undefined}
                       >
                         {side.label}
                       </button>
@@ -1054,21 +1169,34 @@
                   <span class="tl-status">{isPlaying ? "▶ 播放中" : "■ 已暂停"}</span>
                 </div>
               </div>
-              <div class="tracklist-scroll">
-                <div class="current-side-row">
-                  <span>{currentSide.label} 面</span>
-                  <span>{currentSide.tracks.length} 首 · {formatTime(currentSide.totalDuration)}</span>
-                </div>
-                {#each currentSide.tracks as track, index}
+              <div class="track-card-stage">
+                {#each trackCardItems as card (card.key + card.role)}
                   <div
-                    class="track-row"
-                    class:playing={isCurrentTrack(currentSide, index, currentTime)}
-                    aria-current={isCurrentTrack(currentSide, index, currentTime) ? "true" : undefined}
+                    class="track-card"
+                    class:track-card--steady={card.role === "steady"}
+                    class:track-card--out={card.role === "out"}
+                    class:track-card--in={card.role === "in"}
+                    class:track-card--swap={card.kind === "swap"}
+                    class:track-card--flip={card.kind === "flip"}
                   >
-                    <span class="track-led" aria-hidden="true"></span>
-                    <span class="track-num">{String(index + 1).padStart(2, "0")}</span>
-                    <span class="track-title">{track.title}</span>
-                    <span class="track-time">{formatTime(track.duration)}</span>
+                    <div class="tracklist-scroll">
+                      <div class="current-side-row">
+                        <span>{card.side.label} 面</span>
+                        <span>{card.side.tracks.length} 首 · {formatTime(card.side.totalDuration)}</span>
+                      </div>
+                      {#each card.side.tracks as track, index}
+                        <div
+                          class="track-row"
+                          class:playing={card.role !== "out" && card.sideIndex === currentSideIndex && isCurrentTrack(card.side, index, currentTime)}
+                          aria-current={card.role !== "out" && card.sideIndex === currentSideIndex && isCurrentTrack(card.side, index, currentTime) ? "true" : undefined}
+                        >
+                          <span class="track-led" aria-hidden="true"></span>
+                          <span class="track-num">{String(index + 1).padStart(2, "0")}</span>
+                          <span class="track-title">{track.title}</span>
+                          <span class="track-time">{formatTime(track.duration)}</span>
+                        </div>
+                      {/each}
+                    </div>
                   </div>
                 {/each}
               </div>
@@ -1289,6 +1417,7 @@
   .shelf-host {
     display: flex;
     flex-direction: column;
+    width: 100%;
     height: 100%;
     min-width: 0;
     min-height: 0;
@@ -1297,6 +1426,7 @@
   /* ── Info 纸卡 ── */
   .info-host {
     display: flex;
+    width: 100%;
     height: 100%;
     min-width: 0;
     min-height: 0;
@@ -1305,7 +1435,13 @@
     position: relative;
     border-radius: 8px;
     padding: 18px 20px;
-    background: linear-gradient(180deg, #f5e8cf 0%, #e9d7b1 100%);
+    isolation: isolate;
+    background:
+      linear-gradient(180deg, rgba(255, 250, 239, 0.5), rgba(224, 202, 160, 0.18)),
+      url("./assets/textures/cardstock-warm-fiber.webp"),
+      linear-gradient(180deg, #f5e8cf 0%, #e9d7b1 100%);
+    background-size: auto, 520px 520px, auto;
+    background-position: center, center, center;
     box-shadow:
       0 6px 14px rgba(0, 0, 0, 0.3),
       inset 0 0 0 1px rgba(180, 140, 90, 0.35),
@@ -1319,15 +1455,27 @@
     min-width: 0;
     min-height: 0;
   }
-  .paper::before {
+  .paper::before,
+  .paper::after {
     content: "";
     position: absolute;
     inset: 0;
     border-radius: 8px;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0.5  0 0 0 0 0.4  0 0 0 0 0.25  0 0 0 0.12 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-    mix-blend-mode: multiply;
-    opacity: 0.6;
     pointer-events: none;
+    z-index: 0;
+  }
+  .paper::before {
+    background:
+      url("./assets/textures/cardstock-edge-wear.webp") center / 100% 100% no-repeat,
+      url("./assets/textures/paper-speckles.webp") center / 440px 440px repeat;
+    mix-blend-mode: multiply;
+    opacity: 0.36;
+  }
+  .paper::after {
+    background:
+      radial-gradient(ellipse at 18% 12%, rgba(255, 255, 255, 0.2), transparent 42%),
+      linear-gradient(90deg, rgba(102, 66, 28, 0.055), transparent 14%, transparent 86%, rgba(102, 66, 28, 0.075));
+    opacity: 0.9;
   }
   .paper > * {
     position: relative;
@@ -1597,6 +1745,67 @@
     color: #8a6a3c;
     letter-spacing: 0.06em;
   }
+  .track-card-stage {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    perspective: 900px;
+  }
+  .track-card {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    padding: 0 2px 0 0;
+    border-radius: 6px;
+    transform-origin: 50% 12%;
+    will-change: transform, opacity;
+  }
+  .track-card--steady {
+    opacity: 1;
+    transform: translateY(0) rotateX(0deg);
+  }
+  .track-card--out {
+    animation: track-card-out 560ms cubic-bezier(0.36, 0.07, 0.19, 0.97) forwards;
+  }
+  .track-card--in {
+    opacity: 0;
+    transform: translateY(34px) rotateX(-7deg);
+    animation: track-card-in 680ms cubic-bezier(0.19, 1, 0.22, 1) forwards;
+  }
+  .track-card--in.track-card--swap {
+    animation-delay: 1.48s;
+  }
+  .track-card--in.track-card--flip {
+    animation-delay: 0.56s;
+  }
+  @keyframes track-card-out {
+    0% {
+      opacity: 1;
+      transform: translateY(0) rotateX(0deg);
+      filter: blur(0);
+    }
+    100% {
+      opacity: 0;
+      transform: translateY(-24px) rotateX(6deg);
+      filter: blur(0.7px);
+    }
+  }
+  @keyframes track-card-in {
+    0% {
+      opacity: 0;
+      transform: translateY(34px) rotateX(-7deg);
+      filter: blur(0.8px);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0) rotateX(0deg);
+      filter: blur(0);
+    }
+  }
   .tracklist-scroll {
     flex: 1;
     overflow-y: auto;
@@ -1701,59 +1910,6 @@
   .liner-empty .helper {
     color: #5a4326;
     font-size: 18px;
-  }
-
-  /* ── Action bar ── */
-  .action-bar {
-    flex-direction: row;
-    align-items: center;
-    gap: 10px;
-    padding: 14px 22px 16px;
-    border-top: 1px dashed rgba(90, 58, 31, 0.28);
-  }
-  .action-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    height: 40px;
-    padding: 0 18px;
-    border: 0;
-    border-radius: 6px;
-    background: linear-gradient(180deg, #3a2a16 0%, #1f140a 100%);
-    color: #f2e3c1;
-    font-family: "Noto Serif SC", serif;
-    font-size: 14px;
-    letter-spacing: 0.08em;
-    cursor: pointer;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 230, 185, 0.18),
-      inset 0 -1px 0 rgba(0, 0, 0, 0.4),
-      0 2px 4px rgba(0, 0, 0, 0.25);
-    transition: filter 0.15s ease, transform 0.1s ease;
-  }
-  .action-btn:hover {
-    filter: brightness(1.1);
-  }
-  .action-btn:active {
-    transform: translateY(1px);
-  }
-  .action-btn--primary {
-    flex: 1;
-    background: linear-gradient(180deg, #5a3a18 0%, #2e1b08 100%);
-    color: #ffe6b3;
-  }
-  .action-btn--ghost {
-    background: linear-gradient(180deg, #4a3420 0%, #251808 100%);
-  }
-  .action-btn--ghost .heart {
-    color: #e36b3a;
-  }
-  .action-btn--icon {
-    width: 40px;
-    padding: 0;
-    font-size: 18px;
-    letter-spacing: 0;
   }
 
   /* ── Workshop Modal ── */

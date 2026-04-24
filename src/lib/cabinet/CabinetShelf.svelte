@@ -228,7 +228,6 @@
     on:wheel={handleWheel}
     aria-label="唱片列表"
   >
-    <div class="shelf-back" aria-hidden="true"></div>
     <div class="shelf-scroll" bind:this={shelfViewportEl}>
       <div class="shelf-track" bind:this={shelfTrackEl}>
         {#if visibleAlbums.length === 0}
@@ -262,8 +261,6 @@
       </div>
     </div>
     <div class="shelf-lip" aria-hidden="true"></div>
-    <div class="shelf-side shelf-side--left" aria-hidden="true"></div>
-    <div class="shelf-side shelf-side--right" aria-hidden="true"></div>
   </div>
 
   <footer class="filter-bar" aria-label="索引筛选">
@@ -348,17 +345,44 @@
   }
 
   .shelf-viewport {
+    position: relative;
     min-height: 0;
     overflow: hidden;
     border-radius: 8px;
     outline: none;
     background:
-      radial-gradient(ellipse at 50% 6%, rgba(224, 170, 86, 0.16), transparent 38%),
-      linear-gradient(180deg, #21150a 0%, #110b06 54%, #2b190b 100%);
+      linear-gradient(180deg, rgba(255, 190, 86, 0.05), rgba(0, 0, 0, 0.18)),
+      url("../../assets/textures/shelf-cavity-oak.webp") center / 100% 100% no-repeat,
+      linear-gradient(180deg, #2e1b0a 0%, #160b03 54%, #321b08 100%);
+    background-blend-mode: screen, normal, normal;
     box-shadow:
       inset 0 5px 11px rgba(0, 0, 0, 0.86),
       inset 0 -1px 0 rgba(255, 224, 160, 0.08),
       inset 0 0 0 1px rgba(0, 0, 0, 0.74);
+  }
+
+  .shelf-viewport::before,
+  .shelf-viewport::after {
+    content: "";
+    position: absolute;
+    pointer-events: none;
+  }
+
+  .shelf-viewport::before {
+    left: 36px;
+    right: 36px;
+    top: 0;
+    z-index: 4;
+    height: 30px;
+    background:
+      radial-gradient(ellipse 62% 120% at 50% 0%, rgba(255, 179, 68, 0.2), transparent 68%),
+      linear-gradient(180deg, rgba(255, 178, 65, 0.12), transparent 100%);
+    mix-blend-mode: screen;
+    opacity: 0.55;
+  }
+
+  .shelf-viewport::after {
+    display: none;
   }
 
   .shelf-viewport:focus-visible {
@@ -367,22 +391,6 @@
       inset 0 -1px 0 rgba(255, 224, 160, 0.08),
       inset 0 0 0 1px rgba(0, 0, 0, 0.74),
       0 0 0 2px rgba(240, 180, 75, 0.45);
-  }
-
-  .shelf-back {
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background:
-      repeating-linear-gradient(
-        90deg,
-        rgba(154, 101, 44, 0.07) 0,
-        rgba(154, 101, 44, 0.07) 1px,
-        transparent 1px,
-        transparent 18px
-      ),
-      linear-gradient(90deg, rgba(0, 0, 0, 0.36), transparent 8%, transparent 92%, rgba(0, 0, 0, 0.36));
-    pointer-events: none;
   }
 
   .shelf-scroll {
@@ -423,39 +431,20 @@
     left: 18px;
     right: 18px;
     bottom: 7px;
-    z-index: 4;
+    z-index: 7;
     display: block;
     height: 9px;
     border-radius: 2px;
     background:
-      linear-gradient(180deg, #5a3518 0%, #2a1607 100%);
+      linear-gradient(180deg, rgba(255, 224, 160, 0.08), rgba(0, 0, 0, 0.28)),
+      url("../../assets/textures/oak-monochrome-grain.webp") center / 520px 520px repeat,
+      linear-gradient(180deg, #6a3f1c 0%, #2a1607 100%);
+    background-blend-mode: screen, multiply, normal;
     box-shadow:
       inset 0 1px 1px rgba(255, 222, 160, 0.16),
       inset 0 -2px 3px rgba(0, 0, 0, 0.76),
       0 -1px 3px rgba(0, 0, 0, 0.38);
     pointer-events: none;
-  }
-
-  .shelf-side {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    z-index: 5;
-    display: block;
-    width: 18px;
-    background:
-      linear-gradient(90deg, rgba(0, 0, 0, 0.42), transparent 76%),
-      linear-gradient(180deg, rgba(82, 51, 23, 0.9), rgba(28, 16, 7, 0.98));
-    pointer-events: none;
-  }
-
-  .shelf-side--left {
-    left: 0;
-  }
-
-  .shelf-side--right {
-    right: 0;
-    transform: scaleX(-1);
   }
 
   .empty-shelf {
@@ -580,7 +569,7 @@
       0 1px 2px rgba(0, 0, 0, 0.32);
     color: rgba(238, 213, 168, 0.76);
     font-family: "Noto Serif SC", serif;
-    font-size: 14px;
+    font-size: 17px;
     letter-spacing: 0.08em;
     line-height: 1;
     transition:
@@ -603,7 +592,7 @@
   .filter-strip small {
     color: currentColor;
     font-family: "JetBrains Mono", "Courier New", monospace;
-    font-size: 11px;
+    font-size: 13px;
     letter-spacing: 0.04em;
     line-height: 1;
     opacity: 0.72;

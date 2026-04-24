@@ -1,8 +1,7 @@
 <script lang="ts">
   import type { LibraryAlbum } from "../types";
   import { countAlbumTracks, getAlbumDuration } from "../library/model";
-
-  const accentCache = new Map<string, string>();
+  import { getFallbackCoverAccent, resolveCoverAccent } from "./coverAccent";
 
   export let album: LibraryAlbum;
   export let isFocused = false;
@@ -41,112 +40,6 @@
     ].join(";");
   }
 
-  function hslToRgb(h: number, s: number, l: number): [number, number, number] {
-    const hue = h / 360;
-    const sat = s / 100;
-    const light = l / 100;
-    const q = light < 0.5 ? light * (1 + sat) : light + sat - light * sat;
-    const p = 2 * light - q;
-    const toRgb = (tRaw: number) => {
-      let t = tRaw;
-      if (t < 0) t += 1;
-      if (t > 1) t -= 1;
-      if (t < 1 / 6) return p + (q - p) * 6 * t;
-      if (t < 1 / 2) return q;
-      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-      return p;
-    };
-    return [
-      Math.round(toRgb(hue + 1 / 3) * 255),
-      Math.round(toRgb(hue) * 255),
-      Math.round(toRgb(hue - 1 / 3) * 255),
-    ];
-  }
-
-  function getFallbackAccent(targetAlbum: LibraryAlbum): string {
-    const base = `${targetAlbum.title}-${targetAlbum.artist}`;
-    const hue = Math.round(18 + seed(base) * 205);
-    const [r, g, b] = hslToRgb(hue, 48, 78);
-    return `${r} ${g} ${b}`;
-  }
-
-  function liftRgb(r: number, g: number, b: number): string {
-    const lift = 0.58;
-    return [
-      Math.round(r + (255 - r) * lift),
-      Math.round(g + (255 - g) * lift),
-      Math.round(b + (255 - b) * lift),
-    ].join(" ");
-  }
-
-  function resolveCoverAccent(src: string): Promise<string | null> {
-    const cached = accentCache.get(src);
-    if (cached) return Promise.resolve(cached);
-    if (typeof Image === "undefined" || typeof document === "undefined") {
-      return Promise.resolve(null);
-    }
-
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.onload = () => {
-        try {
-          const size = 28;
-          const canvas = document.createElement("canvas");
-          canvas.width = size;
-          canvas.height = size;
-          const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          if (!ctx) {
-            resolve(null);
-            return;
-          }
-          ctx.drawImage(img, 0, 0, size, size);
-          const pixels = ctx.getImageData(0, 0, size, size).data;
-          let totalWeight = 0;
-          let rSum = 0;
-          let gSum = 0;
-          let bSum = 0;
-
-          for (let i = 0; i < pixels.length; i += 4) {
-            const a = pixels[i + 3];
-            if (a < 128) continue;
-            const r = pixels[i];
-            const g = pixels[i + 1];
-            const b = pixels[i + 2];
-            const max = Math.max(r, g, b);
-            const min = Math.min(r, g, b);
-            const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            if (luminance < 24 || luminance > 244) continue;
-            const saturation = max === 0 ? 0 : (max - min) / max;
-            const midtoneWeight = 1 - Math.min(1, Math.abs(luminance - 138) / 138);
-            const weight = 0.35 + saturation * 1.45 + midtoneWeight * 0.45;
-            totalWeight += weight;
-            rSum += r * weight;
-            gSum += g * weight;
-            bSum += b * weight;
-          }
-
-          if (totalWeight <= 0) {
-            resolve(null);
-            return;
-          }
-
-          const accent = liftRgb(
-            rSum / totalWeight,
-            gSum / totalWeight,
-            bSum / totalWeight,
-          );
-          accentCache.set(src, accent);
-          resolve(accent);
-        } catch {
-          resolve(null);
-        }
-      };
-      img.onerror = () => resolve(null);
-      img.src = src;
-    });
-  }
-
   function escapeCssUrl(value: string): string {
     return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   }
@@ -175,7 +68,7 @@
   $: sideCount = album.sides.length;
   $: discCount = Math.max(1, Math.ceil(sideCount / 2));
   $: duration = formatTime(getAlbumDuration(album));
-  $: fallbackAccentRgb = getFallbackAccent(album);
+  $: fallbackAccentRgb = getFallbackCoverAccent(album);
   let coverAccentRgb = fallbackAccentRgb;
   let accentToken = 0;
 
@@ -217,7 +110,6 @@
   tabindex={tabIndex}
   aria-label="{album.title}，{album.artist || '未署名艺人'}"
   aria-current={isSelected ? "true" : undefined}
-  title={album.title}
   on:mouseenter={onFocusAlbum}
   on:focus={onFocusAlbum}
   on:click={handleClick}
@@ -242,9 +134,23 @@
       <span class="cover-gloss"></span>
     </span>
     <span class="preview-meta">
-      <strong>{album.title}</strong>
+      <strong class:scrolling-title={album.title.length > 18}>
+        {#if album.title.length > 18}
+          <span class="title-marquee">
+            <span>{album.title}</span>
+            <span aria-hidden="true">{album.title}</span>
+          </span>
+        {:else}
+          <span class="title-single">{album.title}</span>
+        {/if}
+      </strong>
       <span>{album.artist || "未署名艺人"}</span>
-      <small>{discCount} 张碟 · {sideCount} 面 · {trackCount} 首 · {duration}</small>
+      <small class="preview-stats">
+        <span>{discCount} 张碟</span>
+        <span>{sideCount} 面</span>
+        <span>{trackCount} 首</span>
+        <span>{duration}</span>
+      </small>
     </span>
   </span>
 
@@ -279,13 +185,13 @@
   }
 
   .shelf-album.pulled {
-    width: 248px;
+    width: 286px;
     transform: translateY(-8px) rotate(0deg);
     z-index: 20;
   }
 
   .shelf-album.selected-state {
-    width: 248px;
+    width: 286px;
     transform: translateY(-8px) rotate(0deg);
     z-index: 28;
   }
@@ -469,14 +375,15 @@
     text-transform: uppercase;
   }
 
-  .preview {
-    position: absolute;
-    left: 0;
-    bottom: 0;
-    display: grid;
-    grid-template-rows: minmax(0, 1fr) auto;
-    width: 248px;
-    height: 95%;
+	  .preview {
+	    position: absolute;
+	    left: 0;
+	    bottom: 0;
+	    --preview-pad: 14px;
+	    display: flex;
+	    flex-direction: column;
+	    width: 286px;
+	    height: 95%;
     overflow: hidden;
     border-radius: 4px;
     border: 1px solid rgba(42, 24, 8, 0.72);
@@ -518,17 +425,16 @@
       inset 0 1px 0 rgba(255, 240, 210, 0.1);
   }
 
-  .cover-shell {
-    position: relative;
-    display: block;
-    justify-self: center;
-    align-self: center;
-    width: min(calc(100% - 16px), 210px);
-    height: auto;
-    aspect-ratio: 1;
-    max-height: 80%;
-    margin: 8px 8px 0;
-    overflow: hidden;
+	  .cover-shell {
+	    position: relative;
+	    display: block;
+	    flex: 0 0 auto;
+	    align-self: center;
+	    width: calc(100% - var(--preview-pad) * 2);
+	    height: auto;
+	    aspect-ratio: 1;
+	    margin: var(--preview-pad) var(--preview-pad) 0;
+	    overflow: hidden;
     border-radius: 2px;
     background: linear-gradient(145deg, #dbc59a, #765022);
     box-shadow:
@@ -568,8 +474,12 @@
 
   .preview-meta {
     display: grid;
-    gap: 3px;
-    padding: 8px 12px 9px;
+    flex: 1 1 auto;
+    grid-template-rows: 30px 22px minmax(12px, 1fr) auto;
+    gap: 5px;
+    min-height: 0;
+    margin-top: var(--preview-pad);
+    padding: 14px 14px 7px;
     border-top: 1px dashed rgba(226, 170, 76, 0.32);
     background:
       linear-gradient(180deg, rgba(14, 12, 10, 0.92), rgba(8, 7, 6, 0.98));
@@ -578,33 +488,95 @@
   }
 
   .preview-meta strong,
-  .preview-meta span,
+  .preview-meta > span,
   .preview-meta small {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .preview-meta strong {
     font-family: "Cormorant Garamond", "Noto Serif SC", serif;
-    font-size: 20px;
+    font-size: 26px;
     font-weight: 600;
-    line-height: 1.08;
+    line-height: 1.02;
+    white-space: nowrap;
   }
 
-  .preview-meta span {
+  .title-single {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .scrolling-title {
+    position: relative;
+    display: block;
+  }
+
+  .title-marquee {
+    display: inline-flex;
+    gap: 34px;
+    min-width: max-content;
+    animation: preview-title-marquee 9s linear infinite;
+    will-change: transform;
+  }
+
+  .title-marquee span {
+    flex: 0 0 auto;
+  }
+
+  @keyframes preview-title-marquee {
+    0%,
+    18% {
+      transform: translateX(0);
+    }
+    88%,
+    100% {
+      transform: translateX(calc(-50% - 17px));
+    }
+  }
+
+  .preview-meta > span {
     color: rgba(242, 232, 214, 0.78);
     font-family: "Noto Serif SC", serif;
-    font-size: 14px;
+    font-size: 18px;
+    line-height: 1.1;
+    white-space: nowrap;
   }
 
   .preview-meta small {
     color: rgba(226, 190, 126, 0.66);
     font-family: "JetBrains Mono", "Courier New", monospace;
-    font-size: 11px;
+    font-size: 14px;
     letter-spacing: 0.04em;
   }
+
+	  .preview-stats {
+	    align-self: end;
+	    display: flex;
+	    align-items: baseline;
+	    gap: 8px;
+	    width: 100%;
+	    line-height: 1.1;
+	    white-space: nowrap;
+	  }
+
+	  .preview-stats span {
+	    flex: 0 1 auto;
+	    min-width: max-content;
+	  }
+
+	  .preview-stats span:not(:last-child)::after {
+	    content: "·";
+	    margin-left: 8px;
+	    color: rgba(226, 190, 126, 0.42);
+	  }
+
+	  .preview-stats span:last-child {
+	    margin-left: auto;
+	  }
 
   .playing-slot {
     position: absolute;

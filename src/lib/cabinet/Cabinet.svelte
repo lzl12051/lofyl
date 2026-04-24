@@ -7,7 +7,7 @@
   <div class="inlay" aria-hidden="true"></div>
 
   <div class="grid">
-    <div class="player-stack slot">
+    <div class="player-stack module-frame">
       <div class="turntable-slot">
         <slot name="turntable" />
       </div>
@@ -16,12 +16,16 @@
       </div>
     </div>
 
-    <div class="info-slot">
-      <slot name="info" />
+    <div class="info-slot module-frame">
+      <div class="frame-content">
+        <slot name="info" />
+      </div>
     </div>
 
-    <div class="shelf-slot">
-      <slot name="shelf" />
+    <div class="shelf-slot module-frame">
+      <div class="frame-content">
+        <slot name="shelf" />
+      </div>
     </div>
   </div>
 </div>
@@ -50,8 +54,8 @@
     --ink-soft: #5a4326;
     --accent: #c9642d;
     --line: rgba(90, 58, 31, 0.22);
-    --player-width: 867px;
-    --console-height: 160px;
+    --player-width: 826px;
+    --console-height: 150px;
     --stack-gap: 18px;
     --top-zone-height: calc(var(--player-width) + var(--console-height) + var(--stack-gap));
   }
@@ -75,6 +79,7 @@
     position: absolute;
     inset: 0;
     background:
+      url("../../assets/textures/oak-monochrome-grain.webp") center / 760px 760px repeat,
       repeating-linear-gradient(
         92deg,
         rgba(90, 45, 15, 0.1) 0px,
@@ -93,8 +98,10 @@
         transparent 0.5px,
         transparent 3px
       );
+    background-blend-mode: multiply, normal, normal;
     mix-blend-mode: multiply;
-    opacity: 0.85;
+    opacity: 0.52;
+    pointer-events: none;
   }
   .cabinet-shell::after {
     content: "";
@@ -137,92 +144,105 @@
     grid-area: player;
     display: flex;
     flex-direction: column;
-    padding: 18px;
+    padding: 16px;
     gap: 12px;
     min-width: 0;
     min-height: 0;
   }
 
-  /* 凹陷槽位（木板上嵌入的"孔"） */
-  .slot {
+  /* Raised wooden rails around each major cabinet module. */
+  .module-frame {
     position: relative;
-    border-radius: 14px;
-    background: linear-gradient(
-      180deg,
-      rgba(40, 22, 8, 0.55),
-      rgba(40, 22, 8, 0.25)
-    );
+    border-radius: 18px;
+    isolation: isolate;
+    background:
+      linear-gradient(180deg, rgba(255, 226, 170, 0.16), rgba(31, 14, 5, 0.28)),
+      url("../../assets/textures/oak-monochrome-grain.webp") center / 640px 640px repeat,
+      linear-gradient(180deg, #9f6a36 0%, #653817 48%, #3a1d0b 100%);
+    background-blend-mode: screen, multiply, normal;
     box-shadow:
-      inset 0 2px 4px rgba(0, 0, 0, 0.55),
-      inset 0 -1px 0 rgba(255, 230, 190, 0.15),
-      0 1px 0 rgba(255, 230, 190, 0.25);
+      inset 0 1px 0 rgba(255, 235, 190, 0.34),
+      inset 0 -2px 5px rgba(24, 9, 2, 0.64),
+      inset 0 0 0 1px rgba(66, 32, 10, 0.76),
+      0 1px 0 rgba(255, 235, 190, 0.18),
+      0 12px 24px -14px rgba(0, 0, 0, 0.7);
     min-width: 0;
     min-height: 0;
+  }
+  .module-frame::before,
+  .module-frame::after {
+    content: "";
+    position: absolute;
+    pointer-events: none;
+  }
+  .module-frame::before {
+    inset: 6px;
+    z-index: 0;
+    border-radius: 13px;
+    border: 1px solid rgba(20, 8, 2, 0.72);
+    box-shadow:
+      inset 0 2px 6px rgba(0, 0, 0, 0.64),
+      inset 0 -1px 0 rgba(255, 224, 166, 0.16),
+      0 1px 0 rgba(255, 229, 174, 0.26);
+  }
+  .module-frame::after {
+    inset: 1px;
+    z-index: -1;
+    border-radius: inherit;
+    background:
+      linear-gradient(90deg, rgba(255, 230, 175, 0.22), transparent 11%, transparent 89%, rgba(20, 8, 2, 0.26)),
+      linear-gradient(180deg, rgba(255, 240, 204, 0.18), transparent 28%, transparent 72%, rgba(20, 8, 2, 0.38));
+    mix-blend-mode: overlay;
   }
 
   .turntable-slot {
     position: relative;
     flex: 1 1 0;
+    z-index: 1;
     min-height: 0;
     overflow: visible;
   }
   .console-slot {
     container-type: size;
     flex: 0 0 var(--console-height);
+    position: relative;
+    z-index: 1;
     background: none;
     box-shadow: none;
     padding: 0;
+    min-height: 0;
+  }
+  .frame-content {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+  }
+  .frame-content :global(> *) {
+    width: 100%;
+    height: 100%;
+    min-width: 0;
     min-height: 0;
   }
   .shelf-slot {
     grid-area: shelf;
     display: flex;
     flex-direction: column;
-    padding: 0;
+    padding: 12px;
     min-width: 0;
     min-height: 0;
-    overflow: visible;
+    overflow: hidden;
   }
   .info-slot {
     grid-area: info;
     display: block;
+    padding: 12px;
     min-width: 0;
     min-height: 0;
+    overflow: hidden;
   }
 
-  /* 底部 VINYL PLAYER 铜牌 */
-  .cabinet-footer {
-    position: absolute;
-    left: 32px;
-    right: 32px;
-    bottom: 12px;
-    height: var(--footer-height);
-    z-index: 3;
-    display: grid;
-    place-items: center;
-    pointer-events: none;
-  }
-  .brand-plate {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 180px;
-    height: 28px;
-    padding: 0 32px;
-    border-radius: 3px;
-    background:
-      linear-gradient(180deg, #e9c78a 0%, #b7874a 50%, #825c2a 100%);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 244, 214, 0.6),
-      inset 0 -1px 0 rgba(44, 22, 6, 0.5),
-      0 0 0 1px rgba(40, 22, 6, 0.55),
-      0 2px 4px rgba(0, 0, 0, 0.55);
-    color: #1b0e03;
-    font-family: "JetBrains Mono", "Courier New", monospace;
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 0.44em;
-    text-indent: 0.44em;
-    text-shadow: 0 1px 0 rgba(255, 243, 210, 0.35);
-  }
 </style>
