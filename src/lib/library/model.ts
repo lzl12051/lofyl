@@ -1,5 +1,5 @@
 import { convertFileSrc, isTauri } from '@tauri-apps/api/core';
-import { buildAlbum, buildAlbumFromSides, expandLongTrack, MAX_SIDE_DURATION, splitTracksIntoSides } from '../audio/albumSplitter';
+import { buildAlbumFromSides, expandLongTrack, MAX_SIDE_DURATION, splitTracksIntoSides } from '../audio/albumSplitter';
 import type { PreparedImport } from '../audio/importAudio';
 import type { Album, LibraryAlbum, Track } from '../types';
 
@@ -72,6 +72,7 @@ export function createLibraryAlbumFromPreparedImport(
     coverUrl: prepared.coverUrl,
     discArtUrl: undefined,
     sides,
+    categories: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -198,17 +199,25 @@ export function setLibraryAlbumDiscArt(album: LibraryAlbum, discArtUrl?: string)
 }
 
 export function libraryAlbumToPlaybackAlbum(album: LibraryAlbum): Album {
-  // 将 LibraryAlbum 各面展平后，对超长曲目进行虚拟分段展开，再重新分配碟面。
-  // 展开只在播放转换时发生，不影响持久化模型，避免 DB 中 source_path 重复。
-  const playbackTracks = album.sides
-    .flat()
-    .flatMap((track) => expandLongTrack(hydrateTrack(track), MAX_SIDE_DURATION));
+  // 保留用户在 Workshop 中手动编辑后的盘面边界。
+  // 仅在单个 side 内部对超长曲目做虚拟分段；如果该 side 因分段后超长，
+  // 也只会在该 side 内继续拆分，不会跨到相邻 side 重新洗牌。
+  const playbackSides = album.sides
+    .filter((side) => side.length > 0)
+    .flatMap((side) => {
+      const expandedTracks = side.flatMap((track) =>
+        expandLongTrack(hydrateTrack(track), MAX_SIDE_DURATION)
+      );
+      return splitTracksIntoSides(expandedTracks, MAX_SIDE_DURATION).map(
+        (playbackSide) => playbackSide.tracks
+      );
+    });
 
-  return buildAlbum(
+  return buildAlbumFromSides(
     album.id,
     album.title,
     album.artist,
-    playbackTracks,
+    playbackSides,
     album.coverUrl,
     album.discArtUrl ?? album.coverUrl
   );
@@ -222,6 +231,15 @@ export function hydrateLibraryAlbum(album: LibraryAlbum): LibraryAlbum {
     coverUrl: album.coverUrl?.trim() || undefined,
     discArtUrl: album.discArtUrl?.trim() || undefined,
     sides: hydratedSides,
+  };
+}
+
+/** 更新专辑的分类标签（去重、去空字符串） */
+export function setAlbumCategories(album: LibraryAlbum, categories: string[]): LibraryAlbum {
+  return {
+    ...album,
+    categories: [...new Set(categories.map((c) => c.trim()).filter(Boolean))],
+    updatedAt: Date.now(),
   };
 }
 

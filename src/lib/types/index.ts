@@ -43,6 +43,8 @@ export interface LibraryAlbum {
   coverUrl?: string;
   discArtUrl?: string;
   sides: Track[][];
+  categories: string[];   // 用户自定义分类标签（可多个）
+  isFavorite?: boolean;
   createdAt: number;
   updatedAt: number;
 }

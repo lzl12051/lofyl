@@ -25,3 +25,18 @@ export async function deleteLibraryAlbum(albumId: string): Promise<void> {
   if (!isTauri()) return;
   await invoke('delete_album', { albumId });
 }
+
+export async function toggleFavoriteAlbum(albumId: string): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>('toggle_favorite', { albumId });
+}
+
+export async function recordAlbumPlay(albumId: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke('record_play', { albumId });
+}
+
+export async function getRecentlyPlayed(): Promise<string[]> {
+  if (!isTauri()) return [];
+  return invoke<string[]>('get_recently_played');
+}

@@ -5,7 +5,7 @@ import { resolveTrackAtTime } from './albumSplitter';
  * VinylEngine：负责实际音频播放和黑胶音效。
  *
  * 架构分两层：
- * 1. 主音频层（musicSource）：播放实际音乐文件，通过 playbackRate 做 wow & flutter
+ * 1. 主音频层（musicSource）：播放实际音乐文件，带极轻微的黑胶转速漂移
  * 2. 音效层（effectsChain）：程序化生成底噪、爆音、空白轨道白噪音
  */
 export class VinylEngine {
@@ -14,13 +14,10 @@ export class VinylEngine {
   // 主音频
   private musicSource: AudioBufferSourceNode | null = null;
   private musicGain: GainNode;
+  private masterGain!: GainNode;
   private analyser: AnalyserNode;
   private analyserData: Float32Array<ArrayBuffer>;
   private musicBuffer: AudioBuffer | null = null;
-
-  // Wow & flutter LFO
-  private wowLFO: OscillatorNode | null = null;
-  private wowDepth: GainNode;
 
   // 底噪（持续低电平白噪音）
   private vinylNoiseSource: AudioBufferSourceNode | null = null;
@@ -32,8 +29,15 @@ export class VinylEngine {
   private currentTimeInSide = 0;      // 面内时间（秒）
   private playStartContextTime = 0;   // AudioContext 时间戳（开始播放时）
   private playStartSideTime = 0;      // 面内时间（开始播放时）
+  private lastPlaybackClockContextTime = 0;
   private activeTrackIndex = -1;
   private activeTrackOffset = 0;       // 当前曲目内的偏移（秒）
+  private platterBrakeRate = 1;
+  private currentPlaybackRate = 1;
+  private wowPhaseOffset = Math.random() * Math.PI * 2;
+
+  private readonly wowFrequencyHz = 0.095; // 约 10.5 秒一个周期，避免明显跑调
+  private readonly wowDepth = 0.00075;     // 0.075% 音高漂移
 
   // 曲目 buffer 缓存（keyed by track.id，存切片后的 buffer）
   private trackBuffers: Map<string, AudioBuffer> = new Map();
@@ -71,22 +75,38 @@ export class VinylEngine {
     this.analyserData = new Float32Array(
       new ArrayBuffer(this.analyser.frequencyBinCount * Float32Array.BYTES_PER_ELEMENT),
     );
-    this.musicGain.connect(this.analyser);
-    this.analyser.connect(this.ctx.destination);
+    this.masterGain = this.ctx.createGain();
+    this.masterGain.gain.value = 1.0;
+    this.masterGain.connect(this.ctx.destination);
 
-    // Wow & flutter 深度节点（连接到 musicSource.playbackRate，初始化后再连）
-    this.wowDepth = this.ctx.createGain();
-    this.wowDepth.gain.value = 0.003; // 0.3% 音调偏移深度
+    this.musicGain.connect(this.analyser);
+    this.analyser.connect(this.masterGain);
 
     // 底噪增益（默认静音，播放时开启）
     this.vinylNoiseGain = this.ctx.createGain();
     this.vinylNoiseGain.gain.value = 0;
-    this.vinylNoiseGain.connect(this.ctx.destination);
+    this.vinylNoiseGain.connect(this.masterGain);
 
     this.createVinylNoise();
   }
 
   // ─── 公共 API ────────────────────────────────────────────────
+
+  /** 设置主输出音量 (0~1)，平滑过渡避免爆音 */
+  setOutputGain(value: number): void {
+    const clamped = Math.max(0, Math.min(1, value));
+    const now = this.ctx.currentTime;
+    this.masterGain.gain.cancelScheduledValues(now);
+    this.masterGain.gain.setTargetAtTime(clamped, now, 0.04);
+  }
+
+  /** 设置外部盘面制动倍率。1 为正常转速，0 为完全停住。 */
+  setPlatterBrakeRate(value: number): void {
+    const now = this.ctx.currentTime;
+    this.syncPlaybackClock(now);
+    this.platterBrakeRate = Math.max(0, Math.min(1, value));
+    this.updatePlaybackRate(now);
+  }
 
   /** 加载一张面的所有曲目 buffer */
   async loadSide(side: DiscSide): Promise<void> {
@@ -125,8 +145,8 @@ export class VinylEngine {
     this.musicSource.buffer = buffer;
     this.musicSource.connect(this.musicGain);
 
-    // 设置 Wow & flutter
-    this.setupWowFlutter();
+    this.currentPlaybackRate = this.computePlaybackRate(this.ctx.currentTime);
+    this.musicSource.playbackRate.value = this.currentPlaybackRate;
 
     // 播放
     this.musicSource.start(0, offsetInTrack);
@@ -134,6 +154,7 @@ export class VinylEngine {
     this.currentTimeInSide = timeInSide;
     this.playStartContextTime = this.ctx.currentTime;
     this.playStartSideTime = timeInSide;
+    this.lastPlaybackClockContextTime = this.ctx.currentTime;
     this.activeTrackIndex = trackIndex;
     this.activeTrackOffset = offsetInTrack;
 
@@ -176,18 +197,16 @@ export class VinylEngine {
 
   /** 停止并重置 */
   stop(options: { keepNoise?: boolean } = {}): void {
+    this.syncPlaybackClock();
     this.isPlaying = false;
     this.visualBandLevels = this.visualBandLevels.map(() => 0);
+    this.platterBrakeRate = 1;
+    this.currentPlaybackRate = 1;
 
     if (this.musicSource) {
       this.musicSource.onended = null;
       try { this.musicSource.stop(); } catch { /* 已停止 */ }
       this.musicSource = null;
-    }
-
-    if (this.wowLFO) {
-      try { this.wowLFO.stop(); } catch { /* 已停止 */ }
-      this.wowLFO = null;
     }
 
     if (this.crackleTimer) {
@@ -211,7 +230,10 @@ export class VinylEngine {
   /** 实时面内时间（秒） */
   getCurrentTime(): number {
     if (!this.isPlaying) return this.currentTimeInSide;
-    return this.playStartSideTime + (this.ctx.currentTime - this.playStartContextTime);
+    const now = this.ctx.currentTime;
+    this.syncPlaybackClock(now);
+    this.updatePlaybackRate(now);
+    return this.currentTimeInSide;
   }
 
   getIsPlaying(): boolean {
@@ -276,7 +298,7 @@ export class VinylEngine {
         Math.min(1, Math.pow(normalized, 1.12) * tiltCompensation),
       );
       const current = this.visualBandLevels[bandIndex] ?? 0;
-      const smoothing = shaped > current ? 0.38 : 0.16;
+      const smoothing = shaped > current ? 0.46 : 0.28;
       this.visualBandLevels[bandIndex] = current + (shaped - current) * smoothing;
     }
 
@@ -321,17 +343,36 @@ export class VinylEngine {
     }
   }
 
-  private setupWowFlutter(): void {
-    if (!this.musicSource) return;
+  private computePlaybackRate(now: number): number {
+    if (this.platterBrakeRate <= 0.0001) return 0;
+    const wow =
+      1 + Math.sin(now * Math.PI * 2 * this.wowFrequencyHz + this.wowPhaseOffset) * this.wowDepth;
+    return Math.max(0, this.platterBrakeRate * wow);
+  }
 
-    // LFO：模拟皮带驱动的音调微弱波动
-    this.wowLFO = this.ctx.createOscillator();
-    this.wowLFO.frequency.value = 0.8 + Math.random() * 0.4; // 0.8~1.2Hz
-    this.wowLFO.type = 'sine';
-    this.wowLFO.connect(this.wowDepth);
-    this.wowDepth.connect(this.musicSource.playbackRate);
-    this.musicSource.playbackRate.value = 1.0;
-    this.wowLFO.start();
+  private updatePlaybackRate(now: number = this.ctx.currentTime): void {
+    if (!this.musicSource) return;
+    const nextRate = this.computePlaybackRate(now);
+    if (Math.abs(nextRate - this.currentPlaybackRate) < 0.00002) return;
+    this.musicSource.playbackRate.cancelScheduledValues(now);
+    this.musicSource.playbackRate.setTargetAtTime(nextRate, now, 0.018);
+    this.currentPlaybackRate = nextRate;
+  }
+
+  private syncPlaybackClock(now: number = this.ctx.currentTime): void {
+    if (!this.isPlaying) {
+      this.lastPlaybackClockContextTime = now;
+      return;
+    }
+
+    if (this.lastPlaybackClockContextTime === 0) {
+      this.lastPlaybackClockContextTime = now;
+      return;
+    }
+
+    const elapsed = Math.max(0, now - this.lastPlaybackClockContextTime);
+    this.currentTimeInSide += elapsed * this.currentPlaybackRate;
+    this.lastPlaybackClockContextTime = now;
   }
 
   private playNextTrack(): void {
@@ -359,13 +400,16 @@ export class VinylEngine {
     this.musicSource = this.ctx.createBufferSource();
     this.musicSource.buffer = buffer;
     this.musicSource.connect(this.musicGain);
-    this.setupWowFlutter();
+    this.currentPlaybackRate = this.computePlaybackRate(this.ctx.currentTime);
+    this.musicSource.playbackRate.value = this.currentPlaybackRate;
     this.musicSource.start(0, 0);
 
     this.activeTrackIndex = nextTrackIndex;
     this.activeTrackOffset = 0;
     this.playStartContextTime = this.ctx.currentTime;
     this.playStartSideTime = accumulated;
+    this.currentTimeInSide = accumulated;
+    this.lastPlaybackClockContextTime = this.ctx.currentTime;
 
     this.onTrackChange?.(nextTrackIndex);
 
@@ -448,7 +492,7 @@ export class VinylEngine {
 
     source.connect(filter);
     filter.connect(gain);
-    gain.connect(this.ctx.destination);
+    gain.connect(this.masterGain);
     source.start();
   }
 

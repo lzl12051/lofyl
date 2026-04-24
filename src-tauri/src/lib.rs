@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,10 @@ struct LibraryAlbum {
     cover_url: Option<String>,
     disc_art_url: Option<String>,
     sides: Vec<Vec<LibraryTrack>>,
+    #[serde(default)]
+    categories: Vec<String>,
+    #[serde(default)]
+    is_favorite: bool,
     created_at: i64,
     updated_at: i64,
 }
@@ -619,6 +624,19 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
     .map_err(|err| format!("初始化数据库失败: {err}"))?;
 
     ensure_column_exists(conn, "albums", "disc_art_url", "TEXT")?;
+    ensure_column_exists(conn, "albums", "categories", "TEXT")?;
+    ensure_column_exists(conn, "albums", "is_favorite", "INTEGER NOT NULL DEFAULT 0")?;
+
+    conn.execute_batch(
+        r#"
+      CREATE TABLE IF NOT EXISTS recently_played (
+        album_id TEXT NOT NULL,
+        played_at INTEGER NOT NULL,
+        PRIMARY KEY (album_id)
+      );
+      "#,
+    )
+    .map_err(|err| format!("初始化最近播放表失败: {err}"))?;
 
     Ok(())
 }
@@ -687,11 +705,17 @@ fn load_album_tracks(conn: &Connection, album_id: &str) -> Result<Vec<Vec<Librar
     Ok(sides)
 }
 
+fn parse_categories(raw: Option<String>) -> Vec<String> {
+    let Some(s) = raw else { return vec![] };
+    serde_json::from_str::<Vec<String>>(&s).unwrap_or_default()
+}
+
 fn load_album_by_id(conn: &Connection, album_id: &str) -> Result<Option<LibraryAlbum>, String> {
     let album_row = conn
         .query_row(
             r#"
-      SELECT id, title, artist, cover_url, disc_art_url, created_at, updated_at
+      SELECT id, title, artist, cover_url, disc_art_url, categories, created_at, updated_at,
+             COALESCE(is_favorite, 0)
       FROM albums
       WHERE id = ?1
       "#,
@@ -703,15 +727,17 @@ fn load_album_by_id(conn: &Connection, album_id: &str) -> Result<Option<LibraryA
                     row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             },
         )
         .optional()
         .map_err(|err| format!("查询专辑失败: {err}"))?;
 
-    let Some((id, title, artist, cover_url, disc_art_url, created_at, updated_at)) = album_row
+    let Some((id, title, artist, cover_url, disc_art_url, categories_raw, created_at, updated_at, is_favorite)) = album_row
     else {
         return Ok(None);
     };
@@ -722,6 +748,8 @@ fn load_album_by_id(conn: &Connection, album_id: &str) -> Result<Option<LibraryA
         artist,
         cover_url,
         disc_art_url,
+        categories: parse_categories(categories_raw),
+        is_favorite: is_favorite != 0,
         sides: load_album_tracks(conn, album_id)?,
         created_at,
         updated_at,
@@ -824,15 +852,19 @@ fn save_album(app: AppHandle, album: LibraryAlbum) -> Result<LibraryAlbum, Strin
         .map_err(|err| format!("读取专辑创建时间失败: {err}"))?
         .unwrap_or(now);
 
+    let categories_json = serde_json::to_string(&album.categories)
+        .unwrap_or_else(|_| "[]".to_string());
+
     tx.execute(
         r#"
-      INSERT INTO albums (id, title, artist, cover_url, disc_art_url, created_at, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+      INSERT INTO albums (id, title, artist, cover_url, disc_art_url, categories, created_at, updated_at)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         artist = excluded.artist,
         cover_url = excluded.cover_url,
         disc_art_url = excluded.disc_art_url,
+        categories = excluded.categories,
         updated_at = excluded.updated_at
       "#,
         params![
@@ -841,6 +873,7 @@ fn save_album(app: AppHandle, album: LibraryAlbum) -> Result<LibraryAlbum, Strin
             album.artist,
             album.cover_url,
             album.disc_art_url,
+            categories_json,
             created_at,
             now
         ],
@@ -944,6 +977,72 @@ fn delete_album(app: AppHandle, album_id: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn toggle_favorite(app: AppHandle, album_id: String) -> Result<bool, String> {
+    let conn = open_db(&app)?;
+
+    let current: i64 = conn
+        .query_row(
+            "SELECT COALESCE(is_favorite, 0) FROM albums WHERE id = ?1",
+            params![album_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| format!("读取收藏状态失败: {err}"))?;
+
+    let next = if current == 0 { 1i64 } else { 0i64 };
+
+    conn.execute(
+        "UPDATE albums SET is_favorite = ?1 WHERE id = ?2",
+        params![next, album_id],
+    )
+    .map_err(|err| format!("更新收藏状态失败: {err}"))?;
+
+    Ok(next != 0)
+}
+
+#[tauri::command]
+fn record_play(app: AppHandle, album_id: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let now = now_millis();
+
+    conn.execute(
+        r#"
+      INSERT INTO recently_played (album_id, played_at)
+      VALUES (?1, ?2)
+      ON CONFLICT(album_id) DO UPDATE SET played_at = excluded.played_at
+      "#,
+        params![album_id, now],
+    )
+    .map_err(|err| format!("记录播放失败: {err}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_recently_played(app: AppHandle) -> Result<Vec<String>, String> {
+    let conn = open_db(&app)?;
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+      SELECT rp.album_id
+      FROM recently_played rp
+      INNER JOIN albums a ON a.id = rp.album_id
+      ORDER BY rp.played_at DESC
+      LIMIT 50
+      "#,
+        )
+        .map_err(|err| format!("准备最近播放查询失败: {err}"))?;
+
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| format!("查询最近播放失败: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("读取最近播放失败: {err}"))?;
+
+    Ok(ids)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -952,7 +1051,10 @@ pub fn run() {
             pick_audio_folder,
             load_library,
             save_album,
-            delete_album
+            delete_album,
+            toggle_favorite,
+            record_play,
+            get_recently_played
         ])
         .setup(|app| {
             let _ = open_db(&app.handle());
